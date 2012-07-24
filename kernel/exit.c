@@ -51,6 +51,7 @@
 #include <trace/events/sched.h>
 #include <linux/hw_breakpoint.h>
 #include <linux/oom.h>
+#include <linux/determinism.h>
 
 #include <asm/uaccess.h>
 #include <asm/unistd.h>
@@ -701,6 +702,85 @@ static void exit_mm(struct task_struct * tsk)
 	task_unlock(tsk);
 	mm_update_next_owner(mm);
 	mmput(mm);
+    /* Release deterministic mm. */
+    /*if ((tsk->is_deterministic || tsk->is_master_space) &&
+            tsk->snapshot_mm)
+    {
+        / *printk("snapshot_mm is %08lx\n", tsk->snapshot_mm);* /
+        mm_release(tsk->snapshot_mm);
+        mm_update_next_owner(tsk->snapshot_mm);
+        mmput(tsk->snapshot_mm);
+    }*/
+}
+void exit_mm2(struct task_struct * tsk, struct mm_struct *mm)
+{
+	struct core_state *core_state;
+
+	mm_release(tsk, mm);
+	if (!mm)
+		return;
+	/*
+	 * Serialize with any possible pending coredump.
+	 * We must hold mmap_sem around checking core_state
+	 * and clearing tsk->mm.  The core-inducing thread
+	 * will increment ->nr_threads for each thread in the
+	 * group with ->mm != NULL.
+	 */
+	down_read(&mm->mmap_sem);
+	core_state = mm->core_state;
+	if (core_state) {
+		struct core_thread self;
+		up_read(&mm->mmap_sem);
+
+		self.task = tsk;
+		self.next = xchg(&core_state->dumper.next, &self);
+		/*
+		 * Implies mb(), the result of xchg() must be visible
+		 * to core_state->dumper.
+		 */
+		if (atomic_dec_and_test(&core_state->nr_threads))
+			complete(&core_state->startup);
+
+		for (;;) {
+			set_task_state(tsk, TASK_UNINTERRUPTIBLE);
+			if (!self.task) /* see coredump_finish() */
+				break;
+			schedule();
+		}
+	    __set_task_state(tsk, TASK_RUNNING);
+		down_read(&mm->mmap_sem);
+	}
+    //printk("ZERO AT (1) %08lx %d %d\n", mm, atomic_read(&mm->mm_users),
+    //        atomic_read(&mm->mm_count));
+	//atomic_inc(&mm->mm_count);
+    //printk("ZERO AT (2) %08lx %d %d\n", mm, atomic_read(&mm->mm_users),
+    //        atomic_read(&mm->mm_count));
+	/* more a memory barrier than a real lock */
+	task_lock(tsk);
+	//tsk->mm = NULL;
+	up_read(&mm->mmap_sem);
+    //printk("ZERO AT (3) %08lx %d %d\n", mm, atomic_read(&mm->mm_users),
+    //        atomic_read(&mm->mm_count));
+	enter_lazy_tlb(mm, current);
+	/* We don't want this task to be frozen prematurely */
+    //printk("ZERO AT (4) %08lx %d %d\n", mm, atomic_read(&mm->mm_users),
+    //        atomic_read(&mm->mm_count));
+	clear_freeze_flag(tsk);
+    //printk("ZERO AT (5) %08lx %d %d\n", mm, atomic_read(&mm->mm_users),
+    //        atomic_read(&mm->mm_count));
+	if (tsk->signal->oom_score_adj == OOM_SCORE_ADJ_MIN)
+		atomic_dec(&mm->oom_disable_count);
+    //printk("ZERO AT (6) %08lx %d %d\n", mm, atomic_read(&mm->mm_users),
+    //        atomic_read(&mm->mm_count));
+	task_unlock(tsk);
+    //printk("ZERO AT (7) %08lx %d %d\n", mm, atomic_read(&mm->mm_users),
+    //        atomic_read(&mm->mm_count));
+	mm_update_next_owner(mm);
+    //printk("ZERO AT (8) %08lx %d %d\n", mm, atomic_read(&mm->mm_users),
+    //        atomic_read(&mm->mm_count));
+    //if (mm)
+    //    printk("Putting exit_mm2 %08lx %d\n", mm, atomic_read(&mm->mm_users));
+	mmput(mm);
 }
 
 /*
@@ -822,6 +902,13 @@ static void exit_notify(struct task_struct *tsk, int group_dead)
 {
 	int signal;
 	void *cookie;
+
+    /* TODO I might be able to use one of the above methods (do_notify_parent)
+       but as a quick fix, this is how I wake up any sleeping parent. */
+    if (tsk->is_deterministic || tsk->is_master_space)
+    {
+        deterministic_notify_parent(tsk);
+    }
 
 	/*
 	 * This does two things:
@@ -983,7 +1070,23 @@ NORET_TYPE void do_exit(long code)
 	tsk->exit_code = code;
 	taskstats_exit(tsk, group_dead);
 
+    if(tsk->mm&&tsk->snapshot_mm)
+    {
+        //printk("ACTUAL MM %08lx(%d,%d) DETMM %08lx(%d, %d)\n",tsk-> mm,
+        //        atomic_read(&tsk->mm->mm_users), atomic_read(&tsk->mm->mm_count),
+        //        tsk->snapshot_mm, atomic_read(&tsk->snapshot_mm->mm_users),
+        //        atomic_read(&tsk->snapshot_mm->mm_count));
+    }
 	exit_mm(tsk);
+    if (tsk->is_deterministic && tsk->snapshot_mm)
+    {
+        //printk("Removing deterministic mm %08lx\n", tsk->snapshot_mm);
+        //printk("SNAP_MM2 is users %d count %d\n",
+        //        atomic_read(&tsk->snapshot_mm->mm_users),
+        //        atomic_read(&tsk->snapshot_mm->mm_count));
+        exit_mm2(tsk, tsk->snapshot_mm);
+        tsk->snapshot_mm = NULL;
+    }
 
 	if (group_dead)
 		acct_process();
@@ -1015,7 +1118,7 @@ NORET_TYPE void do_exit(long code)
 	/*
 	 * FIXME: do that only when needed, using sched_exit tracepoint
 	 */
-	flush_ptrace_hw_breakpoint(tsk);
+	ptrace_put_breakpoints(tsk);
 
 	exit_notify(tsk, group_dead);
 #ifdef CONFIG_NUMA

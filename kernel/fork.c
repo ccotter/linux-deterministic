@@ -719,7 +719,7 @@ fail_nocontext:
 	return NULL;
 }
 
-static int copy_mm(unsigned long clone_flags, struct task_struct * tsk)
+int copy_mm(unsigned long clone_flags, struct task_struct * tsk)
 {
 	struct mm_struct * mm, *oldmm;
 	int retval;
@@ -1076,6 +1076,9 @@ static struct task_struct *copy_process(unsigned long clone_flags,
 
 	init_sigpending(&p->pending);
 
+    p->is_deterministic = 0;
+    p->is_master_space = 0;
+    p->snapshot_mm = NULL;
 	p->utime = cputime_zero;
 	p->stime = cputime_zero;
 	p->gtime = cputime_zero;
@@ -1390,6 +1393,75 @@ struct task_struct * __cpuinit fork_idle(int cpu)
 	return task;
 }
 
+/*
+ * This routine mimics do_fork except that data structures are set up
+ * specifically for the determinism.
+ */
+long do_dfork(unsigned long clone_flags,
+	      unsigned long stack_start,
+	      struct pt_regs *regs,
+	      unsigned long stack_size,
+	      int __user *parent_tidptr,
+	      int __user *child_tidptr,
+          struct task_struct **tsk)
+{
+	struct task_struct *p;
+	int trace = 0;
+	long nr;
+
+	/*
+	 * When called from kernel_thread, don't do user tracing stuff.
+	 */
+	if (likely(user_mode(regs)))
+		trace = tracehook_prepare_clone(clone_flags);
+
+	p = copy_process(clone_flags, stack_start, regs, stack_size,
+			 child_tidptr, NULL, trace);
+	/*
+	 * Do this prior waking up the new thread - the thread pointer
+	 * might get invalid after that point, if the thread exits quickly.
+	 */
+	if (!IS_ERR(p)) {
+
+        /* FLush all signals, block all but SIGKILL, SIGSTOP, SIGCONT. Other
+         * code still enforces that no user process can send a deterministic
+         * process signals. */
+        sigset_t blocked;
+        sigfillset(&blocked);
+        sigdelsetmask(&blocked, sigmask(SIGKILL) | sigmask(SIGCONT) |
+                sigmask(SIGSTOP));
+        sigprocmask_tsk(p, SIG_SETMASK, &blocked, NULL);
+        flush_signals(p);
+
+		trace_sched_process_fork(current, p);
+
+		nr = task_pid_vnr(p);
+
+		if (clone_flags & CLONE_PARENT_SETTID)
+			put_user(nr, parent_tidptr);
+
+		audit_finish_fork(p);
+		tracehook_report_clone(regs, clone_flags, nr, p);
+
+		/*
+		 * We set PF_STARTING at creation in case tracing wants to
+		 * use this to distinguish a fully live task from one that
+		 * hasn't gotten to tracehook_report_clone() yet.  Now we
+		 * clear it and set the child going.
+		 */
+		p->flags &= ~PF_STARTING;
+
+        __set_task_state(p, TASK_INTERRUPTIBLE);
+
+		tracehook_report_clone_complete(trace, regs,
+						clone_flags, nr, p);
+
+	} else {
+		nr = PTR_ERR(p);
+	}
+    *tsk = p;
+	return nr;
+}
 /*
  *  Ok, this is the main fork-routine.
  *

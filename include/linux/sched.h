@@ -386,6 +386,9 @@ extern int sysctl_max_map_count;
 #ifdef CONFIG_MMU
 extern void arch_pick_mmap_layout(struct mm_struct *mm);
 extern unsigned long
+arch_get_unmapped_area_mm(struct file *, unsigned long, unsigned long,
+		       unsigned long, unsigned long, struct mm_struct *);
+extern unsigned long
 arch_get_unmapped_area(struct file *, unsigned long, unsigned long,
 		       unsigned long, unsigned long);
 extern unsigned long
@@ -1254,6 +1257,9 @@ struct task_struct {
 #endif
 
 	struct mm_struct *mm, *active_mm;
+#ifdef CONFIG_COMPAT_BRK
+	unsigned brk_randomized:1;
+#endif
 #if defined(SPLIT_RSS_COUNTING)
 	struct task_rss_stat	rss_stat;
 #endif
@@ -1271,6 +1277,26 @@ struct task_struct {
 
 	/* Revert to default priority/policy when forking */
 	unsigned sched_reset_on_fork:1;
+
+    /* Whether or not this process is operating in "deterministic mode." */
+    unsigned int is_deterministic:1;
+    unsigned int is_master_space:1;
+	/* Deterministic process id. This is controlled by the user process (no
+     * global namespaces for determinism). */
+    pid_t d_pid;
+    /* det_sem provides exclusive access to the resources owned by a
+       deterministic process. */
+    struct rw_semaphore det_sem;
+    /* Processes are added to this wait queue that want access to this
+       process's resources. */
+    wait_queue_head_t det_rq;
+    wait_queue_t det_wait;
+    /* Whether or not this task has been set in motion by its parent. The
+     * parent can only actually perform dput/dget when child->d_running==0.
+     * Otherwise, the parent blocks. */
+    atomic_t d_running;
+    /* Deterministic snapshot/merge information. */
+    struct mm_struct *snapshot_mm;
 
 	pid_t pid;
 	pid_t tgid;
@@ -1527,6 +1553,9 @@ struct task_struct {
 		unsigned long bytes; 		/* uncharged usage */
 		unsigned long memsw_bytes; /* uncharged mem+swap usage */
 	} memcg_batch;
+#endif
+#ifdef CONFIG_HAVE_HW_BREAKPOINT
+	atomic_t ptrace_bp_refcnt;
 #endif
 };
 
@@ -2178,7 +2207,10 @@ extern int disallow_signal(int);
 extern int do_execve(const char *,
 		     const char __user * const __user *,
 		     const char __user * const __user *, struct pt_regs *);
-extern long do_fork(unsigned long, unsigned long, struct pt_regs *, unsigned long, int __user *, int __user *);
+extern long do_fork(unsigned long, unsigned long, struct pt_regs *,
+        unsigned long, int __user *, int __user *);
+extern long do_dfork(unsigned long, unsigned long, struct pt_regs *,
+        unsigned long, int __user *, int __user *, struct task_struct **);
 struct task_struct *fork_idle(int);
 
 extern void set_task_comm(struct task_struct *tsk, char *from);

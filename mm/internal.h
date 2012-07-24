@@ -67,6 +67,9 @@ static inline unsigned long page_order(struct page *page)
 }
 
 #ifdef CONFIG_MMU
+extern long mlock_vma_pages_range_tsk(struct vm_area_struct *vma,
+			unsigned long start, unsigned long end, struct task_struct *tsk,
+            struct mm_struct *mm);
 extern long mlock_vma_pages_range(struct vm_area_struct *vma,
 			unsigned long start, unsigned long end);
 extern void munlock_vma_pages_range(struct vm_area_struct *vma,

@@ -2123,6 +2123,54 @@ static void set_huge_ptep_writable(struct vm_area_struct *vma,
 	}
 }
 
+/* Similar to copy_page_range_dst for hugetbl. */
+int copy_hugetlb_page_range_dst(struct mm_struct *dst, struct mm_struct *src,
+        struct vm_area_struct *vma, unsigned long dst_addr, unsigned long addr,
+        unsigned long end)
+{
+	pte_t *src_pte, *dst_pte, entry;
+	struct page *ptepage;
+	int cow;
+	struct hstate *h = hstate_vma(vma);
+	unsigned long sz = huge_page_size(h);
+    printk("inside copy_hugetlb_page_range %08lx %08lx %08lx\n", dst_addr, addr,
+            end);
+
+	cow = (vma->vm_flags & (VM_SHARED | VM_MAYWRITE)) == VM_MAYWRITE;
+
+	for (; addr < end; addr += sz, dst_addr += sz) {
+		src_pte = huge_pte_offset(src, addr);
+		if (!src_pte)
+			continue;
+		dst_pte = huge_pte_alloc(dst, dst_addr, sz);
+		if (!dst_pte)
+			goto nomem;
+
+		/* If the pagetables are shared don't copy or take references */
+        /* TODO what does this mean or why does this happen??? */
+		if (dst_pte == src_pte)
+			continue;
+
+        /* TODO ensure locking makes sense. */
+		spin_lock(&dst->page_table_lock);
+		spin_lock_nested(&src->page_table_lock, SINGLE_DEPTH_NESTING);
+		if (!huge_pte_none(huge_ptep_get(src_pte))) {
+			if (cow)
+				huge_ptep_set_wrprotect(src, addr, src_pte);
+			entry = huge_ptep_get(src_pte);
+			ptepage = pte_page(entry);
+			get_page(ptepage);
+			page_dup_rmap(ptepage);
+			set_huge_pte_at(dst, dst_addr, dst_pte, entry);
+		}
+		spin_unlock(&src->page_table_lock);
+		spin_unlock(&dst->page_table_lock);
+	}
+	return 0;
+
+nomem:
+	return -ENOMEM;
+}
 
 int copy_hugetlb_page_range(struct mm_struct *dst, struct mm_struct *src,
 			    struct vm_area_struct *vma)
