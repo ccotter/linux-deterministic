@@ -340,6 +340,3 @@ ENTRY(sys_call_table)
 	.long sys_fanotify_init
 	.long sys_fanotify_mark
 	.long sys_prlimit64		/* 340 */
-	.long sys_dput
-	.long sys_dget
-	.long sys_dret
