@@ -686,8 +686,15 @@ __SYSCALL(__NR_setns, sys_setns)
 #define __NR_sendmmsg 269
 __SC_COMP(__NR_sendmmsg, sys_sendmmsg, compat_sys_sendmmsg)
 
+#define __NR_dput 270
+__SYSCALL(__NR_dput, sys_dput);
+#define __NR_dget 271
+__SYSCALL(__NR_dget, sys_dget);
+#define __NR_dret 272
+__SYSCALL(__NR_dret, sys_dret);
+
 #undef __NR_syscalls
-#define __NR_syscalls 270
+#define __NR_syscalls 273
 
 /*
  * All syscalls below here should go away really,
