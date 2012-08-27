@@ -67,6 +67,7 @@
 #include <linux/user-return-notifier.h>
 #include <linux/oom.h>
 #include <linux/khugepaged.h>
+#include <linux/determinism.h>
 
 #include <asm/pgtable.h>
 #include <asm/pgalloc.h>
@@ -1138,6 +1139,7 @@ static struct task_struct *copy_process(unsigned long clone_flags,
 
 	init_sigpending(&p->pending);
 
+	p->d_flags = 0;
 	p->utime = cputime_zero;
 	p->stime = cputime_zero;
 	p->gtime = cputime_zero;
@@ -1529,6 +1531,56 @@ long do_fork(unsigned long clone_flags,
 			freezer_count();
 			tracehook_report_vfork_done(p, nr);
 		}
+	} else {
+		nr = PTR_ERR(p);
+	}
+	return nr;
+}
+
+/* Similar to do_fork, but for deterministic processes. Special attention must
+   be given to the setup of such processes. */
+long do_dfork(unsigned long clone_flags,
+	      unsigned long stack_start,
+	      struct pt_regs *regs,
+	      unsigned long stack_size,
+	      int __user *parent_tidptr,
+	      int __user *child_tidptr,
+		  struct task_struct **result)
+{
+	struct task_struct *p;
+	int trace = 0;
+	long nr;
+
+	p = copy_process(clone_flags, stack_start, regs, stack_size,
+			 child_tidptr, NULL, trace);
+	/*
+	 * Do this prior waking up the new thread - the thread pointer
+	 * might get invalid after that point, if the thread exits quickly.
+	 */
+	if (!IS_ERR(p)) {
+        /* Flush all signals, block all but SIGKILL, SIGSTOP, SIGCONT. Other
+         * code still enforces that no user process can send a deterministic
+         * process signals. */
+        sigset_t blocked;
+        sigfillset(&blocked);
+        sigdelsetmask(&blocked, sigmask(SIGKILL) | sigmask(SIGCONT) |
+                sigmask(SIGSTOP));
+        sigprocmask_tsk(p, SIG_SETMASK, &blocked, NULL);
+        flush_signals(p);
+
+		nr = task_pid_vnr(p);
+		audit_finish_fork(p);
+
+		/*
+		 * We set PF_STARTING at creation in case tracing wants to
+		 * use this to distinguish a fully live task from one that
+		 * hasn't gotten to tracehook_report_clone() yet.  Now we
+		 * clear it and set the child going.
+		 */
+		p->flags &= ~PF_STARTING;
+        __set_task_state(p, TASK_INTERRUPTIBLE);
+
+		*result = p;
 	} else {
 		nr = PTR_ERR(p);
 	}

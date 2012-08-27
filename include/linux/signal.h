@@ -250,7 +250,9 @@ extern long do_sigpending(void __user *, unsigned long);
 extern int do_sigtimedwait(const sigset_t *, siginfo_t *,
 				const struct timespec *);
 extern int sigprocmask(int, sigset_t *, sigset_t *);
+extern int sigprocmask_tsk(struct task_struct *, int, sigset_t *, sigset_t *);
 extern void set_current_blocked(const sigset_t *);
+extern void set_tsk_blocked(struct task_struct *, const sigset_t *);
 extern int show_unhandled_signals;
 
 extern int get_signal_to_deliver(siginfo_t *info, struct k_sigaction *return_ka, struct pt_regs *regs, void *cookie);

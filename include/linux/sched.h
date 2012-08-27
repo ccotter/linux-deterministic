@@ -1305,6 +1305,26 @@ struct task_struct {
 	unsigned sched_reset_on_fork:1;
 	unsigned sched_contributes_to_load:1;
 
+    /* If and only if != 0, d_flags indicates various attributes of a
+	   deterministic process. */
+	unsigned long d_flags;
+	/* Deterministic process id. This is controlled by the user process (no
+     * global namespaces for determinism). */
+    pid_t d_pid;
+    /* det_sem provides exclusive access to the resources owned by a
+       deterministic process. */
+    struct rw_semaphore det_sem;
+    /* Processes are added to this wait queue that want access to this
+       process's resources. */
+    wait_queue_head_t det_rq;
+    //wait_queue_t det_wait;
+    /* Whether or not this task has been set in motion by its parent. The
+     * parent can only actually perform dput/dget when child->d_running==0.
+     * Otherwise, the parent blocks. */
+    atomic_t d_running;
+    /* Deterministic snapshot/merge information. */
+    //struct mm_struct *snapshot_mm;
+
 	pid_t pid;
 	pid_t tgid;
 

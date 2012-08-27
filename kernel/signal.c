@@ -2284,6 +2284,7 @@ EXPORT_SYMBOL(force_sig);
 EXPORT_SYMBOL(send_sig);
 EXPORT_SYMBOL(send_sig_info);
 EXPORT_SYMBOL(sigprocmask);
+EXPORT_SYMBOL(sigprocmask_tsk);
 EXPORT_SYMBOL(block_all_signals);
 EXPORT_SYMBOL(unblock_all_signals);
 
@@ -2333,6 +2334,12 @@ void set_current_blocked(const sigset_t *newset)
 	__set_task_blocked(tsk, newset);
 	spin_unlock_irq(&tsk->sighand->siglock);
 }
+void set_tsk_blocked(struct task_struct *tsk, const sigset_t *newset)
+{
+	spin_lock_irq(&tsk->sighand->siglock);
+	__set_task_blocked(tsk, newset);
+	spin_unlock_irq(&tsk->sighand->siglock);
+}
 
 /*
  * This is also useful for kernel threads that want to temporarily
@@ -2342,12 +2349,11 @@ void set_current_blocked(const sigset_t *newset)
  * interface happily blocks "unblockable" signals like SIGKILL
  * and friends.
  */
-int sigprocmask(int how, sigset_t *set, sigset_t *oldset)
+int sigprocmask_tsk(struct task_struct *tsk, int how, sigset_t *set, sigset_t *oldset)
 {
-	struct task_struct *tsk = current;
 	sigset_t newset;
 
-	/* Lockless, only current can change ->blocked, never from irq */
+	/* Lockless, only tsk can change ->blocked, never from irq */
 	if (oldset)
 		*oldset = tsk->blocked;
 
@@ -2365,8 +2371,13 @@ int sigprocmask(int how, sigset_t *set, sigset_t *oldset)
 		return -EINVAL;
 	}
 
-	set_current_blocked(&newset);
+	set_tsk_blocked(tsk, &newset);
 	return 0;
+}
+
+int sigprocmask(int how, sigset_t *set, sigset_t *oldset)
+{
+	return sigprocmask_tsk(current, how, set, oldset);
 }
 
 /**
