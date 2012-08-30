@@ -234,7 +234,7 @@ void __switch_to_xtra(struct task_struct *prev_p, struct task_struct *next_p,
 
 int sys_fork(struct pt_regs *regs)
 {
-	return do_fork(SIGCHLD, regs->sp, regs, 0, NULL, NULL);
+    return do_fork(SIGCHLD, regs->sp, regs, 0, NULL, NULL);
 }
 
 /*

@@ -849,9 +849,9 @@ asmlinkage long sys_open_by_handle_at(int mountdirfd,
 asmlinkage long sys_setns(int fd, int nstype);
 
 asmlinkage long sys_dput(pid_t child_dpid, long flags, unsigned long start,
-		size_t size, unsigned long dst);
+		size_t size, unsigned long dst, struct pt_regs *regs);
 asmlinkage long sys_dget(pid_t child_dpid, long flags, unsigned long start,
-		size_t size, unsigned long dst);
+		size_t size, unsigned long dst, struct pt_regs *regs);
 asmlinkage long sys_dret(void);
 
 #endif

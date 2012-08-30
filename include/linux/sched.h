@@ -70,6 +70,7 @@ struct sched_param {
 
 #include <linux/smp.h>
 #include <linux/sem.h>
+#include <linux/semaphore.h>
 #include <linux/signal.h>
 #include <linux/compiler.h>
 #include <linux/completion.h>
@@ -1313,15 +1314,15 @@ struct task_struct {
     pid_t d_pid;
     /* det_sem provides exclusive access to the resources owned by a
        deterministic process. */
-    struct rw_semaphore det_sem;
+    struct semaphore d_sem;
     /* Processes are added to this wait queue that want access to this
        process's resources. */
-    wait_queue_head_t det_rq;
+    wait_queue_head_t d_wq_head;
     //wait_queue_t det_wait;
     /* Whether or not this task has been set in motion by its parent. The
      * parent can only actually perform dput/dget when child->d_running==0.
      * Otherwise, the parent blocks. */
-    atomic_t d_running;
+    atomic_t d_status;
     /* Deterministic snapshot/merge information. */
     //struct mm_struct *snapshot_mm;
 
