@@ -7,8 +7,6 @@
 /* The low two bytes specify general operations. The high two bytes
    specify flags for a specific flag. */
 
-//#define DETERMINE_START             0x0001
-//#define DETERMINE_REGS              0x0002
 //#define DETERMINE_VM_COPY           0x0004
 //#define DETERMINE_ZERO_FILL         0x0008
 //#define DETERMINE_SNAP              0x0010
@@ -37,6 +35,7 @@ extern long do_dfork(unsigned long, unsigned long, struct pt_regs *,
 /* For (struct task_struct*)->d_flags. */
 #define DET_DETERMINISTIC 0x0001
 #define DET_MASTER        0x0002
+#define DET_POISON        0x0004
 
 /* Process is alive and in a state ready to begin execution but is not
    on the scheduler queue. */
@@ -57,6 +56,7 @@ extern long do_dfork(unsigned long, unsigned long, struct pt_regs *,
 
 #define is_deterministic_or_master(tsk) ((DET_DETERMINISTIC | DET_MASTER) & (tsk)->d_flags)
 #define is_deterministic(tsk) (DET_DETERMINISTIC & (tsk)->d_flags)
+#define is_deterministic_poison(tsk) (DET_POISON & (tsk)->d_flags)
 
 #endif
 

@@ -63,6 +63,8 @@
 	.code64
 	.section .entry.text, "ax"
 
+.globl is_valid_syscall
+
 #ifdef CONFIG_FUNCTION_TRACER
 #ifdef CONFIG_DYNAMIC_FTRACE
 ENTRY(mcount)
@@ -484,7 +486,33 @@ system_call_fastpath:
 	cmpq $__NR_syscall_max,%rax
 	ja badsys
 	movq %r10,%rcx
+/* Deterministic processes can only call certain allowed syscalls.
+ * Unfortunately, this function is called for EVERY processes syscalls...
+ */
+	push %rax
+	push %r9
+	push %r8
+	push %rcx
+	push %rdx
+	push %rsi
+	push %rdi
+	movq %rax, %rdi
+	call is_valid_syscall
+	pop %rdi
+	pop %rsi
+	pop %rdx
+	pop %rcx
+	pop %r8
+	pop %r9
+	cmp $0x0, %rax
+	jne det_invalid_syscall
+	pop %rax /* Fix stack and retrieve syscall number. */
 	call *sys_call_table(,%rax,8)  # XXX:	 rip relative
+	jmp after_syscall_check
+det_invalid_syscall:
+	pop %rax /* Fix stack (no longer care about syscall number. */
+	mov $-EPERM, %rax
+after_syscall_check:
 	movq %rax,RAX-ARGOFFSET(%rsp)
 /*
  * Syscall return path ending with SYSRET (fast path)
@@ -600,6 +628,9 @@ tracesys:
 	cmpq $__NR_syscall_max,%rax
 	ja   int_ret_from_sys_call	/* RAX(%rsp) set to -ENOSYS above */
 	movq %r10,%rcx	/* fixup for C */
+/* We shouldn't have to check for syscall validity here since deterministic
+ * processes can't be traced.
+ */
 	call *sys_call_table(,%rax,8)
 	movq %rax,RAX-ARGOFFSET(%rsp)
 	/* Use IRET because user could have changed frame */

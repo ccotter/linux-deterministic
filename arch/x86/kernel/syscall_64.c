@@ -1,5 +1,6 @@
 /* System call table for x86-64. */
 
+#include <linux/determinism.h>
 #include <linux/linkage.h>
 #include <linux/sys.h>
 #include <linux/cache.h>
@@ -7,6 +8,7 @@
 
 #define __NO_STUBS
 
+#undef __SYSCALL
 #define __SYSCALL(nr, sym) extern asmlinkage void sym(void) ;
 #undef _ASM_X86_UNISTD_64_H
 #include <asm/unistd_64.h>
@@ -14,6 +16,21 @@
 #undef __SYSCALL
 #define __SYSCALL(nr, sym) [nr] = sym,
 #undef _ASM_X86_UNISTD_64_H
+
+long is_valid_syscall(long nr)
+{
+	if (!is_deterministic(current))
+		return 0;
+	switch (nr) {
+		case __NR_exit:
+		case __NR_write:
+		case __NR_dput:
+		case __NR_dget:
+		case __NR_dret:
+			return 0;
+	}
+	return -EINVAL;
+}
 
 typedef void (*sys_call_ptr_t)(void);
 

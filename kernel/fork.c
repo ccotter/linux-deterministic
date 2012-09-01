@@ -1558,13 +1558,10 @@ long do_dfork(unsigned long clone_flags,
 	 * might get invalid after that point, if the thread exits quickly.
 	 */
 	if (!IS_ERR(p)) {
-        /* Flush all signals, block all but SIGKILL, SIGSTOP, SIGCONT. Other
-         * code still enforces that no user process can send a deterministic
-         * process signals. */
+        /* Flush all signals, block all but SIGKILL. */
         sigset_t blocked;
         sigfillset(&blocked);
-        sigdelsetmask(&blocked, sigmask(SIGKILL) | sigmask(SIGCONT) |
-                sigmask(SIGSTOP));
+        sigdelsetmask(&blocked, sigmask(SIGKILL));
         sigprocmask_tsk(p, SIG_SETMASK, &blocked, NULL);
         flush_signals(p);
 
