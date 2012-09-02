@@ -1,0 +1,41 @@
+
+Deterministic process execution for Linux
+
+Model
+
+    Deterministic programs on Linux exist side by side with normal non deterministic
+	Linux programs. A deterministic program, called a deterministic process group,
+	has a single "master" process and any number of child deterministic processes
+	(which themselves may have deterministic children). The process hierarchy imposes
+	strict requirements: children cannot outlive their parents, and processes may not
+	be reparented (except for the master process).
+
+	The master process is inherently non-deterministic. It has full access to the
+	system's resources (via Linux syscalls). The master process creates deterministic
+	processes via dput(), and interacts with these children via dput() and dget(). The
+	master is the only process that does not have to block waiting for a child when
+	issuing a dget() - thus, a master can maximize process scheduling.
+
+	Deterministic processes are restricted to only using the three deterministic
+	syscalls: dput(), dget(), and dret(). Clearly, these processes have no direct
+	access to underlying hardware resources as do normal Linux processes. Deterministic
+	processes receive input from their parents. When a deterministic process issues a
+	dput() or dget() to set/retrieve data from a child, it must synchronize by waiting
+	for the child to issue a dret(). These strict synchronization restrictions ensure
+	a deterministic execution sequence. All processes created with dput() are deterministic,
+	so deterministic processes can only create deterministic processes.
+
+Syscall interface
+
+Exceptions
+
+	If a deterministic process generates a processor exception or illegally tries
+	to merge memory (merge exception), the process is immediately marked poisoned
+	and can no longer be run. All children processes are similarly marked and
+	stopped.
+
+	For now, even segfaults that could generate a SIGSEGV signal and be handled
+	by a process will still cause a deterministic process to be marked poisoned.
+	This is a limitation of my implementation; I could extend my implementation
+	to support handling deterministically reproducible recoverable exceptions.
+

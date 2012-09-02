@@ -23,7 +23,7 @@ long is_valid_syscall(long nr)
 		return 0;
 	switch (nr) {
 		case __NR_exit:
-		case __NR_write:
+		case __NR_write: /* Allow this for debugging. */
 		case __NR_dput:
 		case __NR_dget:
 		case __NR_dret:

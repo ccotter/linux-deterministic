@@ -14,9 +14,8 @@
 
 #include <asm/syscall.h>
 
-#define DET_RQ_STOPPED 0
-#define DET_RQ_RUNNING_NORMAL 1
-#define DET_RQ_FIRST_TIME 2 /* Has never been started yet. */
+#define DET_STOPPED 0
+#define DET_RUNNING_NORMAL 1
 
 /* Wait for a deterministic child to do a dret() or fault.
  * This function returns 0 if the child process was stopped with a normal
@@ -26,10 +25,10 @@
 static int wait_for_child(struct task_struct *child)
 {
 	int ret = 0;
-	DEFINE_WAIT(wait);
+	printk("Begin wait\n");
 	for (;;) {
-		prepare_to_wait(&child->d_wq_head, &wait, TASK_INTERRUPTIBLE);
-		if (DET_RQ_RUNNING_NORMAL != atomic_read(&child->d_status))
+		set_current_state(TASK_STOPPED);
+		if (DET_RUNNING_NORMAL != atomic_read(&child->d_status))
 			break;
 		if (unlikely(fatal_signal_pending(current))) {
 			ret = -EINTR;
@@ -37,9 +36,12 @@ static int wait_for_child(struct task_struct *child)
 		}
 		schedule();
 	}
-	finish_wait(&child->d_wq_head, &wait);
+	printk("Ent wait\n");
+	set_current_state(TASK_RUNNING);
 	return ret;
 }
+
+
 
 /*
  *
@@ -51,9 +53,7 @@ static int wait_for_child(struct task_struct *child)
  *     * On success, the least significant 32-bits of the return value are
  *       important. Various bits are set (see determinism.h) indicating child
  *       status.
- *     * -EINTR when the caller is interrupted by a signal while waiting for a
- *       child to perform a dret().
- *     * On other errors (no memory, etc) the appropriate negative error number
+ *     * On errors (no memory, etc) the appropriate negative error number
  *       is set.
  *   When current is deterministic:
  *     * On success, the least significant 32-bits of the return value are
@@ -67,8 +67,7 @@ SYSCALL_DEFINE6(dput, pid_t, child_dpid, long, flags, unsigned long, start,
 		size_t, size, unsigned long, dst, struct pt_regs *, regs)
 {
 	long ret;
-	struct list_head *list;
-	struct task_struct *child;
+	struct task_struct *child, *p;
 
 	/* Validate arguments first. TODO */
 
@@ -86,34 +85,29 @@ SYSCALL_DEFINE6(dput, pid_t, child_dpid, long, flags, unsigned long, start,
 	ret = 0;
 	child = NULL;
 	/* See if child even exists - O(N) runtime, very slow. TODO make faster */
-	list_for_each(list, &current->children) {
-		struct task_struct *tsk = list_entry(list, struct task_struct, sibling);
-		if (child_dpid == tsk->d_pid && current == tsk->parent) {
-			child = tsk;
+	list_for_each_entry(p, &current->children, sibling) {
+		if (child_dpid == p->d_pid && current == p->parent) {
+			child = p;
 			break;
 		}
 	}
 
-	if (NULL == child) {
+	if (!child) {
 		ret = do_dfork(0, regs->sp, regs, 0, NULL, NULL, &child);
 		if (unlikely(ret < 0)) {
 			/* TODO fault. */
 			return -ENOMEM;
 		}
+		child->d_parent = current;
 		child->d_pid = child_dpid;
 		child->d_flags = DET_DETERMINISTIC;
-		sema_init(&child->d_sem, 1);
-		atomic_set(&child->d_status, DET_RQ_FIRST_TIME);
-		init_waitqueue_head(&child->d_wq_head);
+		atomic_set(&child->d_status, DET_STOPPED);
 	} else {
 		int waitrc = wait_for_child(child);
 		if (-EINTR == waitrc) {
-			/* Might as well exit immediately. */
-			do_exit(0);
-			/* NOTREACHED */
+			/* Return now and be killed by the SIGKILL. */
+			return 0;
 		}
-		/* At this point, the child is not running and will not run until we
-		 * tell it to. */
 	}
 
 	if (is_deterministic_poison(child)) {
@@ -127,13 +121,8 @@ SYSCALL_DEFINE6(dput, pid_t, child_dpid, long, flags, unsigned long, start,
 	}
 
 	if (DET_START & flags) {
-		if (DET_RQ_FIRST_TIME == atomic_read(&child->d_status)) {
-			atomic_set(&child->d_status, DET_RQ_RUNNING_NORMAL);
-			wake_up_process(child);
-		} else {
-			atomic_set(&child->d_status, DET_RQ_RUNNING_NORMAL);
-			wake_up_interruptible(&child->d_wq_head);
-		}
+		atomic_set(&child->d_status, DET_RUNNING_NORMAL);
+		wake_up_process(child);
 		ret = DET_S_RUNNING;
 	} else {
 		ret = DET_S_READY;
@@ -156,17 +145,17 @@ SYSCALL_DEFINE0(dret)
 	if (!is_deterministic(current))
 		return -EPERM;
 
-	atomic_set(&current->d_status, DET_RQ_STOPPED);
-	wake_up_interruptible(&current->d_wq_head);
+	atomic_set(&current->d_status, DET_STOPPED);
+	wake_up_process(current->real_parent);
 	for (;;) {
-		prepare_to_wait(&current->d_wq_head, &wait, TASK_INTERRUPTIBLE);
-		if (DET_RQ_RUNNING_NORMAL == atomic_read(&child->d_status) ||
+		set_current_state(TASK_STOPPED);
+		if (DET_RUNNING_NORMAL == atomic_read(&current->d_status) ||
 				fatal_signal_pending(current)) {
 			break;
 		}
 		schedule();
 	}
-	finish_wait(&current->d_wq_head, &wait);
+	set_current_state(TASK_RUNNING);
 
 	return 0;
 }

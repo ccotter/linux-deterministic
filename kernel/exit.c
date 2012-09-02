@@ -814,6 +814,15 @@ static void forget_original_parent(struct task_struct *father)
 	}
 }
 
+void zap_det_process(struct task_struct *tsk, int exit_code)
+{
+    tsk->signal->flags = SIGNAL_GROUP_EXIT;
+    tsk->signal->group_exit_code = exit_code;
+    tsk->signal->group_stop_count = 0;
+    sigaddset(&tsk->pending.signal, SIGKILL);
+    signal_wake_up(tsk, 1);
+}
+
 /*
  * Send signals to all our closest relatives so that they know
  * to properly mourn us..
@@ -824,15 +833,32 @@ static void exit_notify(struct task_struct *tsk, int group_dead)
 	void *cookie;
 
 	/*
-	 * This does two things:
+	 * This does up to three things:
 	 *
-  	 * A.  Make init inherit all the child processes
+  	 * A.  Make init inherit all the child processes or kill all children
+     *  if tsk is deterministic.
 	 * B.  Check to see if any process groups have become orphaned
 	 *	as a result of our exiting, and if they have any stopped
 	 *	jobs, send them a SIGHUP and then a SIGCONT.  (POSIX 3.2.2.2)
+     * C.  If the process is deterministic, notify its parent to wake it up
+     *  from a possible dput()/dget() sync point.
 	 */
-	forget_original_parent(tsk);
+    if (is_deterministic_or_master(tsk)) {
+        struct task_struct *p;
+        printk("OK %d\n",__LINE__);
+	    list_for_each_entry(p, &tsk->children, sibling) {
+            printk("OK %d\n",__LINE__);
+            printk("Zapping %d\n", p->pid);
+            zap_det_process(p, 0);
+        }
+        printk("OK %d\n",__LINE__);
+    }
+    forget_original_parent(tsk);
 	exit_task_namespaces(tsk);
+
+    if (is_deterministic(tsk)) {
+        deterministic_notify_parent(tsk->d_parent);
+    }
 
 	write_lock_irq(&tasklist_lock);
 	if (group_dead)

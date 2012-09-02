@@ -26,8 +26,18 @@
 //void copy_regs(struct task_struct *from, struct task_struct *into);
 
 /* When a deterministic process exits, we need to notify the parent so wake it
-   up. */
-extern void deterministic_notify_parent(struct task_struct *tsk);
+ * up. */
+static inline void deterministic_notify_parent(struct task_struct *tsk)
+{
+    wake_up_process(tsk);
+}
+
+/* Marks a deterministic process and its children as poisoned. All marked
+ * child processes are killed immediately, and the marked parent task is
+ * stopped from ever running again. This process is kept around until its
+ * parent notices its death with a dput()/dget().
+ */
+extern void mark_deterministic_poisoned(struct task_struct *tsk);
 
 extern long do_dfork(unsigned long, unsigned long, struct pt_regs *,
 		unsigned long, int __user *, int __user *, struct task_struct **);
