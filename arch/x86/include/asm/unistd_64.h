@@ -686,7 +686,7 @@ __SYSCALL(__NR_dput, stub_dput)
 #define __NR_dget				310
 __SYSCALL(__NR_dget, stub_dget)
 #define __NR_dret				311
-__SYSCALL(__NR_dret, sys_dret)
+__SYSCALL(__NR_dret, stub_dret)
 
 #ifndef __NO_STUBS
 #define __ARCH_WANT_OLD_READDIR

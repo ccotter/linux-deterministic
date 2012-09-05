@@ -8,40 +8,119 @@
  *
  */
 
+#include <linux/determinism.h>
 #include <linux/syscalls.h>
 #include <linux/sched.h>
-#include <linux/determinism.h>
+#include <linux/regset.h>
 
 #include <asm/syscall.h>
 
-#define DET_STOPPED 0
-#define DET_RUNNING_NORMAL 1
+static inline int get_child_status(struct task_struct *child)
+{
+	return atomic_read(&child->d_status);
+}
+
+static struct task_struct *
+find_deterministic_child(struct task_struct *tsk, pid_t dpid)
+{
+	struct task_struct *p;
+	/* O(N) runtime, very slow. TODO make faster */
+	list_for_each_entry(p, &current->children, sibling) {
+		if (dpid == p->d_pid && tsk == p->parent) {
+			return p;
+		}
+	}
+	return NULL;
+}
+
+static inline int sigsets_overlap(const sigset_t *one, const sigset_t *two)
+{
+	size_t i, n = sizeof(one->sig);
+	for (i = 0; i < n; ++i) {
+		if (one->sig[i] & two->sig[i])
+			return 1;
+	}
+	return 0;
+}
 
 /* Wait for a deterministic child to do a dret() or fault.
- * This function returns 0 if the child process was stopped with a normal
- * dret(). If a fatal SIGKILL arrives to current, this function returns -EINTR
+ * This function returns a DET_S_* status code if the child process was stopped
+ * with a normal dret(). If a fatal SIGKILL arrives to current, or the master
+ * process receives any non-blocked signal, this function returns -EINTR
  * immediately.
  */
 static int wait_for_child(struct task_struct *child)
 {
-	int ret = 0;
-	printk("Begin wait\n");
+	int ret;
+	int is_master = is_master(current);
+	long state = TASK_STOPPED;
+	sigset_t oldset;
+
+	if (is_master && master_allow_signals(current)) {
+		state = TASK_INTERRUPTIBLE; /* Only set if current wants to allow custom
+									   signal set. */
+		sigprocmask(SIG_SETMASK, &current->d_blocked, &oldset);
+	}
 	for (;;) {
-		set_current_state(TASK_STOPPED);
-		if (DET_RUNNING_NORMAL != atomic_read(&child->d_status))
+		set_current_state(state);
+		if (DET_S_RUNNING != atomic_read(&child->d_status)) {
+			ret = get_child_status(child);
 			break;
+		}
 		if (unlikely(fatal_signal_pending(current))) {
 			ret = -EINTR;
 			break;
 		}
+		if (signal_pending(current) && is_master(current)) {
+			ret = -ERESTARTNOINTR;
+			break;
+		}
 		schedule();
 	}
-	printk("Ent wait\n");
 	set_current_state(TASK_RUNNING);
+	if (TASK_INTERRUPTIBLE == state) {
+		sigprocmask(SIG_SETMASK, &oldset, NULL);
+	}
 	return ret;
 }
 
+static void __mark_deterministic_poisoned(struct task_struct *tsk, int kill) {
+	struct task_struct *p;
 
+	tsk->d_flags |= DET_POISON;
+	/* MArking DET_S_EXCEPT tells the kernel to not remote the task_struct yet - this
+	 * parent will want to know about this. */
+	atomic_set(&tsk->d_status, DET_S_EXCEPT);
+	list_for_each_entry(p, &tsk->children, sibling) {
+		__mark_deterministic_poisoned(p, 0);
+	}
+	if (kill)
+		zap_det_process(tsk, 0);
+}
+
+void mark_deterministic_poisoned(struct task_struct *tsk)
+{
+	__mark_deterministic_poisoned(tsk, 1);
+}
+
+static long set_blocked_signals(struct task_struct *tsk, unsigned long addr, size_t setsize)
+{
+	sigset_t __user *blocked = (sigset_t __user*)addr;
+	sigset_t tmp;
+	if (sizeof(sigset_t) != setsize)
+		return -EINVAL;
+	if (copy_from_user(&tmp, blocked, sizeof(sigset_t)))
+		return -EFAULT;
+
+	sigdelsetmask(&tmp, sigmask(SIGKILL)|sigmask(SIGSTOP));
+	if (sigisemptyset(&tmp)) {
+		tsk->d_flags &= ~DET_ALLOW_SIGNALS;
+	} else {
+		memcpy(&tsk->d_blocked, &tmp, sizeof(sigset_t));
+		tsk->d_flags |= DET_CUSTOM_SIGNALS;
+	}
+	return 0;
+}
 
 /*
  *
@@ -62,16 +141,29 @@ static int wait_for_child(struct task_struct *child)
  *     * On any failure that is deterministically reproducible (eg. invalid
  *       arguments), an appropriate negative error number is returned.
  *
+ *  Flags are a little complicated (just a little). The lowest order 8 bits are
+ *  reserved to indicate what operation to perform. All remaining bits (24) are
+ *  used to indicate various flags associated with the particular operation. The
+ *  lowest 8 bits are reserved for operation specific flags, and the remaining
+ *  16 bits (upper half) are used for global flags.
+ *
  */
-SYSCALL_DEFINE6(dput, pid_t, child_dpid, long, flags, unsigned long, start,
+SYSCALL_DEFINE6(dput, pid_t, child_dpid, unsigned long, flags, unsigned long, addr,
 		size_t, size, unsigned long, dst, struct pt_regs *, regs)
 {
 	long ret;
-	struct task_struct *child, *p;
+	struct task_struct *child;
+	int child_status;
+	unsigned int operation;
+	unsigned long opflags;
+	
+	operation = 0xff & flags;
+	opflags = 0xff00 & flags;
+	flags &= ~0xffffL;
 
 	/* Validate arguments first. TODO */
 
-	if (DET_BECOME_MASTER & flags) {
+	if (DET_BECOME_MASTER == operation) {
 		if (is_deterministic_or_master(current))
 			return -EPERM;
 		current->d_flags = DET_MASTER;
@@ -82,17 +174,16 @@ SYSCALL_DEFINE6(dput, pid_t, child_dpid, long, flags, unsigned long, start,
 		return -EPERM;
 	}
 
-	ret = 0;
-	child = NULL;
-	/* See if child even exists - O(N) runtime, very slow. TODO make faster */
-	list_for_each_entry(p, &current->children, sibling) {
-		if (child_dpid == p->d_pid && current == p->parent) {
-			child = p;
-			break;
-		}
+	if (DET_ALLOW_SIGNALS == operation) {
+		if (!is_master(current))
+			return -EPERM;
+		return set_blocked_signals(current, addr, size);
 	}
 
+	child = find_deterministic_child(current, child_dpid);
+
 	if (!child) {
+		/* We don't want a SIGCHLD signal when the child dies. */
 		ret = do_dfork(0, regs->sp, regs, 0, NULL, NULL, &child);
 		if (unlikely(ret < 0)) {
 			/* TODO fault. */
@@ -101,55 +192,133 @@ SYSCALL_DEFINE6(dput, pid_t, child_dpid, long, flags, unsigned long, start,
 		child->d_parent = current;
 		child->d_pid = child_dpid;
 		child->d_flags = DET_DETERMINISTIC;
-		atomic_set(&child->d_status, DET_STOPPED);
+		atomic_set(&child->d_status, DET_S_READY);
+		child_status = DET_S_READY;
 	} else {
-		int waitrc = wait_for_child(child);
-		if (-EINTR == waitrc) {
-			/* Return now and be killed by the SIGKILL. */
-			return 0;
+		if (DET_GET_STATUS == operation && is_deterministic(current)) {
+			return get_child_status(child);
+		}
+
+		child_status = wait_for_child(child);
+		if (-EINTR == child_status) {
+			/* Return now to handle the signal. */
+			return -EINTR;
+		} else if (-ERESTARTNOINTR == child_status) {
+			return restart_syscall();
 		}
 	}
 
-	if (is_deterministic_poison(child)) {
-		return DET_S_EXCEPT;
+	if (!(DET_S_READY & child_status)) {
+		/* Can't work with a non-runnable child. Must have faulted or already exited
+		 * cleanly. */
+		return child_status;
 	}
 
-	if (DET_COPY_REGS & flags) {
-		struct pt_regs *dst = task_pt_regs(child);
-		*dst = *regs;
-		syscall_set_return_value(child, dst, 0, 0);
+	ret = 0;
+	switch (operation) {
+		case DET_REGS:
+			ret = deterministic_put_regs(child, (const void __user*)addr, opflags >> 8);
+			if (ret)
+				return ret;
+			break;
+		case DET_KILL:
+			atomic_set(&child->d_status, DET_S_DEAD);
+			zap_det_process(child, 0);
+			break;
+		case DET_GET_STATUS:
+			break;
+		default:
+			return -EINVAL;
 	}
 
 	if (DET_START & flags) {
-		atomic_set(&child->d_status, DET_RUNNING_NORMAL);
+		atomic_set(&child->d_status, DET_S_RUNNING);
 		wake_up_process(child);
-		ret = DET_S_RUNNING;
+		ret |= DET_S_RUNNING;
 	} else {
-		ret = DET_S_READY;
+		ret |= child_status;
 	}
 
 	return ret;
 }
 
-SYSCALL_DEFINE6(dget, pid_t, child_dpid, long, flags, unsigned long, start,
+SYSCALL_DEFINE6(dget, pid_t, child_dpid, unsigned long, flags, unsigned long, addr,
 		size_t, size, unsigned long, dst, struct pt_regs *, regs)
 {
-	printk("IN DGET\n");
-	return -1;
+	long ret;
+	struct task_struct *child;
+	int child_status;
+	unsigned int operation;
+	unsigned long opflags;
+	
+	operation = 0xff & flags;
+	opflags = 0xff00 & flags;
+	flags &= ~0xffffL;
+
+	/* Validate arguments first. TODO */
+
+	if (!is_deterministic_or_master(current)) {
+		return -EPERM;
+	}
+
+	child = find_deterministic_child(current, child_dpid);
+
+	if (!child) {
+		return -ESRCH;
+	}
+
+	if (DET_GET_STATUS == operation && is_deterministic(current)) {
+		return get_child_status(child);
+	}
+
+	child_status = wait_for_child(child);
+	if (-EINTR == child_status) {
+		/* Return now to handle the signal. */
+		return -EINTR;
+	} else if (-ERESTARTNOINTR == child_status) {
+		return restart_syscall();
+	}
+
+	if (!(DET_S_READY & child_status)) {
+		/* Can't work with a non-runnable child. Must have faulted or already exited
+		 * cleanly. */
+		return child_status;
+	}
+
+	ret = 0;
+	switch (operation) {
+		case DET_REGS:
+			ret = deterministic_get_regs(child, (void __user*)addr, opflags >> 8);
+			if (ret)
+				return ret;
+			break;
+		case DET_GET_STATUS: /* Kind of a no op. */
+			break;
+	}
+
+	if (DET_START & flags) {
+		atomic_set(&child->d_status, DET_S_RUNNING);
+		wake_up_process(child);
+		ret |= DET_S_RUNNING;
+	} else {
+		ret |= child_status;
+	}
+
+	return ret;
 }
 
-SYSCALL_DEFINE0(dret)
+SYSCALL_DEFINE1(dret, struct pt_regs *, regs)
 {
 	DEFINE_WAIT(wait);
 
 	if (!is_deterministic(current))
 		return -EPERM;
 
-	atomic_set(&current->d_status, DET_STOPPED);
+	atomic_set(&current->d_status, DET_S_READY);
 	wake_up_process(current->real_parent);
 	for (;;) {
 		set_current_state(TASK_STOPPED);
-		if (DET_RUNNING_NORMAL == atomic_read(&current->d_status) ||
+		if (DET_S_RUNNING == atomic_read(&current->d_status) ||
 				fatal_signal_pending(current)) {
 			break;
 		}
@@ -158,5 +327,14 @@ SYSCALL_DEFINE0(dret)
 	set_current_state(TASK_RUNNING);
 
 	return 0;
+}
+
+void zap_det_process(struct task_struct *tsk, int exit_code)
+{
+    tsk->signal->flags = SIGNAL_GROUP_EXIT;
+    tsk->signal->group_exit_code = exit_code;
+    tsk->signal->group_stop_count = 0;
+    sigaddset(&tsk->pending.signal, SIGKILL);
+    signal_wake_up(tsk, 1);
 }
 

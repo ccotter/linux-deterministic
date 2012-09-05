@@ -1429,3 +1429,32 @@ void syscall_trace_leave(struct pt_regs *regs)
 	if (step || test_thread_flag(TIF_SYSCALL_TRACE))
 		tracehook_report_syscall_exit(regs, step);
 }
+
+long deterministic_put_regs(struct task_struct *dst,
+		const void __user *regs, unsigned int setno)
+{
+	switch (setno) {
+		case DET_REGTYPE_GENERAL:
+			return copy_regset_from_user(dst, task_user_regset_view(current), REGSET_GENERAL,
+					0, sizeof(struct user_regs_struct), regs);
+		case DET_REGTYPE_FP:
+			return copy_regset_from_user(dst, task_user_regset_view(current), REGSET_FP,
+					0, sizeof(struct user_i387_struct), regs);
+	}
+	return -EINVAL;
+}
+
+long deterministic_get_regs(struct task_struct *dst,
+		void __user *regs, unsigned int setno)
+{
+	switch (setno) {
+		case DET_REGTYPE_GENERAL:
+			return copy_regset_to_user(dst, task_user_regset_view(current), REGSET_GENERAL,
+					0, sizeof(struct user_regs_struct), regs);
+		case DET_REGTYPE_FP:
+			return copy_regset_to_user(dst, task_user_regset_view(current), REGSET_FP,
+					0, sizeof(struct user_i387_struct), regs);
+	}
+	return -EINVAL;
+}
+

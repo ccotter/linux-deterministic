@@ -1309,16 +1309,13 @@ struct task_struct {
     /* If and only if != 0, d_flags indicates various attributes of a
 	   deterministic process. */
 	unsigned long d_flags;
-	/* Deterministic process id. This is controlled by the user process (no
-     * global namespaces for determinism). */
     pid_t d_pid;
-    /* Whether or not this task has been set in motion by its parent. The
-     * parent can only actually perform dput/dget when child->d_running==0.
-     * Otherwise, the parent blocks. */
     atomic_t d_status;
     /* Deterministic snapshot/merge information. */
     //struct mm_struct *snapshot_mm;
 	struct task_struct *d_parent;
+	/* Block these signals while in a dput() or dget(). Only used by a master process. */
+	sigset_t d_blocked;
 
 	pid_t pid;
 	pid_t tgid;

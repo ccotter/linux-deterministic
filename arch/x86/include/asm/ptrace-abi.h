@@ -67,6 +67,11 @@
 
 #define PTRACE_OLDSETOPTIONS      21
 
+/* For dput/dget register manipulation code. */
+#define DET_REGTYPE_GENERAL       1
+#define DET_REGTYPE_FP            2
+#define DET_REGTYPE_XFP           3
+
 /* only useful for access 32bit programs / kernels */
 #define PTRACE_GET_THREAD_AREA    25
 #define PTRACE_SET_THREAD_AREA    26

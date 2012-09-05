@@ -848,10 +848,10 @@ asmlinkage long sys_open_by_handle_at(int mountdirfd,
 				      int flags);
 asmlinkage long sys_setns(int fd, int nstype);
 
-asmlinkage long sys_dput(pid_t child_dpid, long flags, unsigned long start,
-		size_t size, unsigned long dst, struct pt_regs *regs);
-asmlinkage long sys_dget(pid_t child_dpid, long flags, unsigned long start,
-		size_t size, unsigned long dst, struct pt_regs *regs);
-asmlinkage long sys_dret(void);
+asmlinkage long sys_dput(pid_t child_dpid, unsigned long flags,
+		unsigned long addr, size_t size, unsigned long dst, struct pt_regs *regs);
+asmlinkage long sys_dget(pid_t child_dpid, unsigned long flags,
+		unsigned long addr, size_t size, unsigned long dst, struct pt_regs *regs);
+asmlinkage long sys_dret(struct pt_regs *regs);
 
 #endif

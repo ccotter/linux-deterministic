@@ -725,6 +725,7 @@ END(\label)
 	PTREGSCALL stub_iopl, sys_iopl, %rsi
     PTREGSCALL stub_dput, sys_dput, %r9
     PTREGSCALL stub_dget, sys_dget, %r9
+    PTREGSCALL stub_dret, sys_dret, %rdi
 
 ENTRY(ptregscall_common)
 	DEFAULT_FRAME 1 8	/* offset 8: return address */

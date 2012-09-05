@@ -28,6 +28,7 @@
 #include <linux/freezer.h>
 #include <linux/pid_namespace.h>
 #include <linux/nsproxy.h>
+#include <linux/determinism.h>
 #define CREATE_TRACE_POINTS
 #include <trace/events/signal.h>
 
@@ -1586,6 +1587,14 @@ int do_notify_parent(struct task_struct *tsk, int sig)
 		ret = tsk->exit_signal = -1;
 		if (psig->action[SIGCHLD-1].sa.sa_handler == SIG_IGN)
 			sig = -1;
+	} else if (is_deterministic(tsk) &&
+			DET_S_EXIT_NORMAL != atomic_read(&tsk->d_status)) {
+		/*
+		 * If tsk is deterministic and exited normally, the parent
+		 * doesn't want to know about the child's death.
+		 */
+		ret = tsk->exit_signal = -1;
+		sig = -1;
 	}
 	if (valid_signal(sig) && sig > 0)
 		__group_send_sig_info(sig, &info, tsk->parent);
