@@ -31,7 +31,7 @@ extern long deterministic_get_regs(struct task_struct *dst,
 #define DET_POISON            0x0004
 #define DET_CUSTOM_SIGNALS    0x0008
 
-/* Flag bits for dput/dget. */
+/* Operations for dput/dget flags argument. */
 #define DET_REGS                 1
 #define DET_BECOME_MASTER        2
 #define DET_GET_STATUS           3
@@ -40,6 +40,12 @@ extern long deterministic_get_regs(struct task_struct *dst,
 
 #define DET_START                (0x0001L << 16)
 #define DET_DEBUG                (0x8000L << 16)
+
+/* Operation specific flags. */
+/* for: DET_GET_STATUS */
+#define DET_DONT_WAIT            (0x1L << 8)
+/* for: DET_KILL */
+#define DET_KILL_POISON          (0x1L << 8)
 
 #define is_deterministic_or_master(tsk) ((DET_DETERMINISTIC | DET_MASTER) & (tsk)->d_flags)
 #define is_deterministic(tsk) (DET_DETERMINISTIC & (tsk)->d_flags)
@@ -59,7 +65,8 @@ extern long deterministic_get_regs(struct task_struct *dst,
 #define DET_S_READY   1 /* Alive and runnable (not in run queue). */
 #define DET_S_RUNNING 2 /* Alive and in run queue. */
 #define DET_S_EXCEPT  3 /* Process killed due to illegal behavior. */
-#define DET_S_DEAD    4 /* Process exited normally. */
+#define DET_S_EXIT_NORMAL    4 /* Process exited normally. */
+#define DET_S_EXCEPT_DEAD    5 /* When an excepted task was killed explicitly by the parent. */
 
 #endif
 

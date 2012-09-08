@@ -1311,6 +1311,9 @@ struct task_struct {
 	unsigned long d_flags;
     pid_t d_pid;
     atomic_t d_status;
+	struct semaphore d_sem;
+	spinlock_t d_spinlock;
+
     /* Deterministic snapshot/merge information. */
     //struct mm_struct *snapshot_mm;
 	struct task_struct *d_parent;

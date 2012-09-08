@@ -1,3 +1,25 @@
 
-Could kill ourselves faster in get_signal_to_deliver().
+Overall limitations
+
+  Linux supports some notion of namespaces, particularly with PIDs, among other
+  things. I'm sure if I could a) leverage this with my implementation of
+  deterministic Linux or b) if my lack of explicit support for namespaces will
+  lead to bugs, etc if namespaces are indeed used by a process.
+
+Improvements in code (runtime, memory, etc):
+
+  Could kill ourselves faster in get_signal_to_deliver().
+
+Sources of non-determinism
+
+  Some parts of the kernel are intentionally designed to allow nondeterminism.
+  The primary reason is debugging - it's nice to be able to write() to the
+  console from a deterministic process while I still develop this kernel
+  modification. I've listed here intentional sources of non-determinism that
+  can safely be removed at some future point (when the code is stable).
+
+  kernel/fork.c: do_dfork() allows a SIGKILL to deterministic processes.
+  arch/x86/kernel/syscall_64.c: is_valid_syscall() allows write() and exit().
+
+  Can other processes wait4() a deterministic process (besides the parent)?
 

@@ -1537,9 +1537,9 @@ long do_fork(unsigned long clone_flags,
 	return nr;
 }
 
-/* Similar to do_fork, but for deterministic processes. Special attention must
- * be given to the setup of such processes.
- * The created process is always in state TASK_STOPPED. */
+/* Similar to do_fork, but for deterministic processes. Special
+ * attention must be given to the setup of such processes. The
+ * created process is always in state TASK_STOPPED. */
 long do_dfork(unsigned long clone_flags,
 	      unsigned long stack_start,
 	      struct pt_regs *regs,
@@ -1554,7 +1554,8 @@ long do_dfork(unsigned long clone_flags,
 	p = copy_process(clone_flags, stack_start, regs, stack_size,
 			 child_tidptr, NULL, 0);
 	if (!IS_ERR(p)) {
-        /* Flush all signals, block all but SIGKILL. */
+        /* Flush all signals, block all but SIGKILL. This is undeterministic, since
+		 * any process then can send a SIGKILL, but this is useful for debugging. */
         sigset_t blocked;
         sigfillset(&blocked);
         sigdelsetmask(&blocked, sigmask(SIGKILL));

@@ -1588,7 +1588,7 @@ int do_notify_parent(struct task_struct *tsk, int sig)
 		if (psig->action[SIGCHLD-1].sa.sa_handler == SIG_IGN)
 			sig = -1;
 	} else if (is_deterministic(tsk) &&
-			DET_S_EXIT_NORMAL != atomic_read(&tsk->d_status)) {
+			DET_S_EXIT_NORMAL == atomic_read(&tsk->d_status)) {
 		/*
 		 * If tsk is deterministic and exited normally, the parent
 		 * doesn't want to know about the child's death.
@@ -2103,6 +2103,20 @@ relock:
 
 			if (!signr)
 				break; /* will return 0 */
+
+			/* We might be able to kill ourselves faster here, but lets
+			 * not risk it yet until the code is more stable. */
+			if (is_deterministic(current)) {
+				switch (signr) {
+					case SIGFPE:
+					case SIGSEGV:
+					case SIGILL:
+						spin_lock(&current->d_spinlock);
+						mark_deterministic_poisoned(current);
+						spin_unlock(&current->d_spinlock);
+						continue;
+				}
+			}
 
 			if (signr != SIGKILL) {
 				signr = ptrace_signal(signr, info,

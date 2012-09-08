@@ -63,8 +63,8 @@ static int wait_for_child(struct task_struct *child)
 	}
 	for (;;) {
 		set_current_state(state);
-		if (DET_S_RUNNING != atomic_read(&child->d_status)) {
-			ret = get_child_status(child);
+		ret = get_child_status(child);
+		if (DET_S_RUNNING != ret) {
 			break;
 		}
 		if (unlikely(fatal_signal_pending(current))) {
@@ -88,8 +88,8 @@ static void __mark_deterministic_poisoned(struct task_struct *tsk, int kill) {
 	struct task_struct *p;
 
 	tsk->d_flags |= DET_POISON;
-	/* MArking DET_S_EXCEPT tells the kernel to not remote the task_struct yet - this
-	 * parent will want to know about this. */
+	/* Marking DET_S_EXCEPT tells the kernel to not remove the task_struct yet - this
+	 * parent will want to know about this. TODO don't make recursive. */
 	atomic_set(&tsk->d_status, DET_S_EXCEPT);
 	list_for_each_entry(p, &tsk->children, sibling) {
 		__mark_deterministic_poisoned(p, 0);
@@ -122,6 +122,16 @@ static long set_blocked_signals(struct task_struct *tsk, unsigned long addr, siz
 	return 0;
 }
 
+/* Children who have died because of an exception (SIGSEGV, SIGILL, etc)
+ * must be reaped by their parent explicitly. Similar to when a parent must
+ * do a wait4() to actually release the associated task_struct object. */
+static int wait_for_det_zombie(struct task_struct *tsk)
+{
+	/* Just use sys_wait4! Easy! */
+	tsk->exit_signal = SIGCHLD;
+	printk("RET IS %d\n", sys_wait4(tsk->pid, NULL, 0, NULL));
+}
+
 /*
  *
  * We need the 6th argument to be pt_regs so that we can properly perform
@@ -145,7 +155,8 @@ static long set_blocked_signals(struct task_struct *tsk, unsigned long addr, siz
  *  reserved to indicate what operation to perform. All remaining bits (24) are
  *  used to indicate various flags associated with the particular operation. The
  *  lowest 8 bits are reserved for operation specific flags, and the remaining
- *  16 bits (upper half) are used for global flags.
+ *  16 bits (upper half) are used for global flags. See determinism.h for
+ *  example flag macros.
  *
  */
 SYSCALL_DEFINE6(dput, pid_t, child_dpid, unsigned long, flags, unsigned long, addr,
@@ -161,7 +172,8 @@ SYSCALL_DEFINE6(dput, pid_t, child_dpid, unsigned long, flags, unsigned long, ad
 	opflags = 0xff00 & flags;
 	flags &= ~0xffffL;
 
-	/* Validate arguments first. TODO */
+	if (!operation)
+		return -EINVAL;
 
 	if (DET_BECOME_MASTER == operation) {
 		if (is_deterministic_or_master(current))
@@ -193,12 +205,10 @@ SYSCALL_DEFINE6(dput, pid_t, child_dpid, unsigned long, flags, unsigned long, ad
 		child->d_pid = child_dpid;
 		child->d_flags = DET_DETERMINISTIC;
 		atomic_set(&child->d_status, DET_S_READY);
+		sema_init(&child->d_sem, 1);
+		spin_lock_init(&child->d_spinlock);
 		child_status = DET_S_READY;
 	} else {
-		if (DET_GET_STATUS == operation && is_deterministic(current)) {
-			return get_child_status(child);
-		}
-
 		child_status = wait_for_child(child);
 		if (-EINTR == child_status) {
 			/* Return now to handle the signal. */
@@ -208,7 +218,15 @@ SYSCALL_DEFINE6(dput, pid_t, child_dpid, unsigned long, flags, unsigned long, ad
 		}
 	}
 
-	if (!(DET_S_READY & child_status)) {
+	if (DET_S_READY != child_status) {
+		/* This is the only way to kill an excepted child. */
+		if (DET_KILL == operation && (opflags & DET_KILL_POISON) &&
+				DET_S_EXCEPT == child_status) {
+			wait_for_det_zombie(child);
+			printk("DID WAIT ZOMIB\n");
+			return DET_S_EXCEPT_DEAD;
+		}
+
 		/* Can't work with a non-runnable child. Must have faulted or already exited
 		 * cleanly. */
 		return child_status;
@@ -222,15 +240,17 @@ SYSCALL_DEFINE6(dput, pid_t, child_dpid, unsigned long, flags, unsigned long, ad
 				return ret;
 			break;
 		case DET_KILL:
-			atomic_set(&child->d_status, DET_S_DEAD);
+			if (DET_START & flags)
+				return -EINVAL;
+			atomic_set(&child->d_status, DET_S_EXIT_NORMAL);
+			child_status = DET_S_EXIT_NORMAL;
 			zap_det_process(child, 0);
 			break;
 		case DET_GET_STATUS:
 			break;
-		default:
-			return -EINVAL;
 	}
 
+	spin_lock(&child->d_spinlock);
 	if (DET_START & flags) {
 		atomic_set(&child->d_status, DET_S_RUNNING);
 		wake_up_process(child);
@@ -238,6 +258,7 @@ SYSCALL_DEFINE6(dput, pid_t, child_dpid, unsigned long, flags, unsigned long, ad
 	} else {
 		ret |= child_status;
 	}
+	spin_unlock(&child->d_spinlock);
 
 	return ret;
 }
@@ -255,7 +276,8 @@ SYSCALL_DEFINE6(dget, pid_t, child_dpid, unsigned long, flags, unsigned long, ad
 	opflags = 0xff00 & flags;
 	flags &= ~0xffffL;
 
-	/* Validate arguments first. TODO */
+	if (!operation)
+		return -EINVAL;
 
 	if (!is_deterministic_or_master(current)) {
 		return -EPERM;
@@ -267,7 +289,9 @@ SYSCALL_DEFINE6(dget, pid_t, child_dpid, unsigned long, flags, unsigned long, ad
 		return -ESRCH;
 	}
 
-	if (DET_GET_STATUS == operation && is_deterministic(current)) {
+	if (DET_GET_STATUS == operation && DET_DONT_WAIT & opflags) {
+		if (!is_master(current))
+			return -EPERM;
 		return get_child_status(child);
 	}
 
@@ -279,7 +303,7 @@ SYSCALL_DEFINE6(dget, pid_t, child_dpid, unsigned long, flags, unsigned long, ad
 		return restart_syscall();
 	}
 
-	if (!(DET_S_READY & child_status)) {
+	if (!(DET_S_READY == child_status)) {
 		/* Can't work with a non-runnable child. Must have faulted or already exited
 		 * cleanly. */
 		return child_status;
@@ -292,7 +316,7 @@ SYSCALL_DEFINE6(dget, pid_t, child_dpid, unsigned long, flags, unsigned long, ad
 			if (ret)
 				return ret;
 			break;
-		case DET_GET_STATUS: /* Kind of a no op. */
+		case DET_GET_STATUS:
 			break;
 	}
 
