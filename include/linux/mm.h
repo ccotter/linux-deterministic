@@ -874,6 +874,7 @@ struct file *shmem_file_setup(const char *name, loff_t size, unsigned long flags
 int shmem_zero_setup(struct vm_area_struct *);
 
 extern int can_do_mlock(void);
+extern int can_do_mlock_tsk(struct task_struct *);
 extern int user_shm_lock(size_t, struct user_struct *);
 extern void user_shm_unlock(size_t, struct user_struct *);
 
@@ -970,7 +971,7 @@ static inline int handle_mm_fault(struct mm_struct *mm,
 }
 #endif
 
-extern int make_pages_present(unsigned long addr, unsigned long end);
+extern int make_pages_present_tsk(struct task_struct *tsk, unsigned long addr, unsigned long end);
 extern int access_process_vm(struct task_struct *tsk, unsigned long addr, void *buf, int len, int write);
 extern int access_remote_vm(struct mm_struct *mm, unsigned long addr,
 		void *buf, int len, int write);
@@ -1031,8 +1032,8 @@ extern unsigned long move_page_tables(struct vm_area_struct *vma,
 		unsigned long old_addr, struct vm_area_struct *new_vma,
 		unsigned long new_addr, unsigned long len);
 extern unsigned long do_mremap(unsigned long addr,
-			       unsigned long old_len, unsigned long new_len,
-			       unsigned long flags, unsigned long new_addr);
+		unsigned long old_len, unsigned long new_len,
+		unsigned long flags, unsigned long new_addr);
 extern int mprotect_fixup(struct vm_area_struct *vma,
 			  struct vm_area_struct **pprev, unsigned long start,
 			  unsigned long end, unsigned long newflags);
@@ -1414,29 +1415,35 @@ extern void removed_exe_file_vma(struct mm_struct *mm);
 extern void set_mm_exe_file(struct mm_struct *mm, struct file *new_exe_file);
 extern struct file *get_mm_exe_file(struct mm_struct *mm);
 
-extern int may_expand_vm(struct mm_struct *mm, unsigned long npages);
+extern int may_expand_vm(struct task_struct *tsk, struct mm_struct *mm, unsigned long npages);
 extern int install_special_mapping(struct mm_struct *mm,
 				   unsigned long addr, unsigned long len,
 				   unsigned long flags, struct page **pages);
 
-extern unsigned long get_unmapped_area(struct file *, unsigned long, unsigned long, unsigned long, unsigned long);
+extern unsigned long get_unmapped_area_tsk(struct task_struct *tsk, struct file *, unsigned long, unsigned long, unsigned long, unsigned long);
 
-extern unsigned long do_mmap_pgoff(struct file *file, unsigned long addr,
-	unsigned long len, unsigned long prot,
-	unsigned long flag, unsigned long pgoff);
-extern unsigned long mmap_region(struct file *file, unsigned long addr,
-	unsigned long len, unsigned long flags,
-	vm_flags_t vm_flags, unsigned long pgoff);
+long sys_mmap_pgoff_tsk(struct task_struct *tsk, unsigned long addr,
+		unsigned long len, unsigned long prot, unsigned long flags,
+		unsigned long fd, unsigned long pgoff);
+extern unsigned long do_mmap_pgoff_tsk(struct task_struct *tsk,
+		struct file *file, unsigned long addr,
+		unsigned long len, unsigned long prot,
+		unsigned long flag, unsigned long pgoff);
+extern unsigned long mmap_region_tsk(struct task_struct *tsk,
+		struct file *file, unsigned long addr,
+		unsigned long len, unsigned long flags,
+		vm_flags_t vm_flags, unsigned long pgoff);
 
-static inline unsigned long do_mmap(struct file *file, unsigned long addr,
-	unsigned long len, unsigned long prot,
-	unsigned long flag, unsigned long offset)
+static inline unsigned long do_mmap_tsk(struct task_struct *tsk,
+		struct file *file, unsigned long addr,
+		unsigned long len, unsigned long prot,
+		unsigned long flag, unsigned long offset)
 {
 	unsigned long ret = -EINVAL;
 	if ((offset + PAGE_ALIGN(len)) < offset)
 		goto out;
 	if (!(offset & ~PAGE_MASK))
-		ret = do_mmap_pgoff(file, addr, len, prot, flag, offset >> PAGE_SHIFT);
+		ret = do_mmap_pgoff_tsk(tsk, file, addr, len, prot, flag, offset >> PAGE_SHIFT);
 out:
 	return ret;
 }
@@ -1525,7 +1532,8 @@ static inline pgprot_t vm_get_page_prot(unsigned long vm_flags)
 }
 #endif
 
-struct vm_area_struct *find_extend_vma(struct mm_struct *, unsigned long addr);
+struct vm_area_struct *find_extend_vma_tsk(struct task_struct *tsk,
+		struct mm_struct *, unsigned long addr);
 int remap_pfn_range(struct vm_area_struct *, unsigned long addr,
 			unsigned long pfn, unsigned long size, pgprot_t);
 int vm_insert_page(struct vm_area_struct *, unsigned long addr, struct page *);

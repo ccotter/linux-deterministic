@@ -200,7 +200,7 @@ SYSCALL_DEFINE5(remap_file_pages, unsigned long, start, unsigned long, size,
 
 			flags &= MAP_NONBLOCK;
 			get_file(file);
-			addr = mmap_region(file, start, size,
+			addr = mmap_region_tsk(current, file, start, size,
 					flags, vma->vm_flags, pgoff);
 			fput(file);
 			if (IS_ERR_VALUE(addr)) {
@@ -237,13 +237,13 @@ SYSCALL_DEFINE5(remap_file_pages, unsigned long, start, unsigned long, size,
 			/*
 			 * might be mapping previously unmapped range of file
 			 */
-			mlock_vma_pages_range(vma, start, start + size);
+			mlock_vma_pages_range_tsk(current, vma, start, start + size);
 		} else {
 			if (unlikely(has_write_lock)) {
 				downgrade_write(&mm->mmap_sem);
 				has_write_lock = 0;
 			}
-			make_pages_present(start, start+size);
+			make_pages_present_tsk(current, start, start+size);
 		}
 	}
 

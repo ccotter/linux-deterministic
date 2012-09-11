@@ -10,6 +10,9 @@ Improvements in code (runtime, memory, etc):
 
   Could kill ourselves faster in get_signal_to_deliver().
 
+  I might not allow processes created with do_dfork() to be placed on an empty
+  CPU - I might force the new process to be run on the same CPU as its parent.
+
 Sources of non-determinism
 
   Some parts of the kernel are intentionally designed to allow nondeterminism.

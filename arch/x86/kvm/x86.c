@@ -6329,7 +6329,7 @@ int kvm_arch_prepare_memory_region(struct kvm *kvm,
 			unsigned long userspace_addr;
 
 			down_write(&current->mm->mmap_sem);
-			userspace_addr = do_mmap(NULL, 0,
+			userspace_addr = do_mmap_tsk(current, NULL, 0,
 						 npages * PAGE_SIZE,
 						 PROT_READ | PROT_WRITE,
 						 map_flags,

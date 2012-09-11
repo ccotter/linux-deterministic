@@ -253,7 +253,7 @@ static unsigned long move_vma(struct vm_area_struct *vma,
 	if (vm_flags & VM_LOCKED) {
 		mm->locked_vm += new_len >> PAGE_SHIFT;
 		if (new_len > old_len)
-			mlock_vma_pages_range(new_vma, new_addr + old_len,
+			mlock_vma_pages_range_tsk(current, new_vma, new_addr + old_len,
 						       new_addr + new_len);
 	}
 
@@ -297,7 +297,7 @@ static struct vm_area_struct *vma_to_resize(unsigned long addr,
 			goto Eagain;
 	}
 
-	if (!may_expand_vm(mm, (new_len - old_len) >> PAGE_SHIFT))
+	if (!may_expand_vm(current, mm, (new_len - old_len) >> PAGE_SHIFT))
 		goto Enomem;
 
 	if (vma->vm_flags & VM_ACCOUNT) {
@@ -369,7 +369,7 @@ static unsigned long mremap_to(unsigned long addr,
 	if (vma->vm_flags & VM_MAYSHARE)
 		map_flags |= MAP_SHARED;
 
-	ret = get_unmapped_area(vma->vm_file, new_addr, new_len, vma->vm_pgoff +
+	ret = get_unmapped_area_tsk(current, vma->vm_file, new_addr, new_len, vma->vm_pgoff +
 				((addr - vma->vm_start) >> PAGE_SHIFT),
 				map_flags);
 	if (ret & ~PAGE_MASK)
@@ -392,7 +392,7 @@ static int vma_expandable(struct vm_area_struct *vma, unsigned long delta)
 		return 0;
 	if (vma->vm_next && vma->vm_next->vm_start < end) /* intersection */
 		return 0;
-	if (get_unmapped_area(NULL, vma->vm_start, end - vma->vm_start,
+	if (get_unmapped_area_tsk(current, NULL, vma->vm_start, end - vma->vm_start,
 			      0, MAP_FIXED) & ~PAGE_MASK)
 		return 0;
 	return 1;
@@ -476,7 +476,7 @@ unsigned long do_mremap(unsigned long addr,
 			vm_stat_account(mm, vma->vm_flags, vma->vm_file, pages);
 			if (vma->vm_flags & VM_LOCKED) {
 				mm->locked_vm += pages;
-				mlock_vma_pages_range(vma, addr + old_len,
+				mlock_vma_pages_range_tsk(current, vma, addr + old_len,
 						   addr + new_len);
 			}
 			ret = addr;
@@ -494,7 +494,7 @@ unsigned long do_mremap(unsigned long addr,
 		if (vma->vm_flags & VM_MAYSHARE)
 			map_flags |= MAP_SHARED;
 
-		new_addr = get_unmapped_area(vma->vm_file, 0, new_len,
+		new_addr = get_unmapped_area_tsk(current, vma->vm_file, 0, new_len,
 					vma->vm_pgoff +
 					((addr - vma->vm_start) >> PAGE_SHIFT),
 					map_flags);

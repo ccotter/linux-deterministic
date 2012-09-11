@@ -21,6 +21,16 @@
 
 #include "internal.h"
 
+int can_do_mlock_tsk(struct task_struct *tsk)
+{
+	if (has_capability(tsk, CAP_IPC_LOCK))
+		return 1;
+	if (task_rlimit(tsk, RLIMIT_MEMLOCK) != 0)
+		return 1;
+	return 0;
+}
+EXPORT_SYMBOL(can_do_mlock_tsk);
+
 int can_do_mlock(void)
 {
 	if (capable(CAP_IPC_LOCK))
@@ -147,9 +157,9 @@ void munlock_vma_page(struct page *page)
  *
  * vma->vm_mm->mmap_sem must be held for at least read.
  */
-static long __mlock_vma_pages_range(struct vm_area_struct *vma,
-				    unsigned long start, unsigned long end,
-				    int *nonblocking)
+static long __mlock_vma_pages_range(struct task_struct *tsk,
+		struct vm_area_struct *vma, unsigned long start, unsigned long end,
+		int *nonblocking)
 {
 	struct mm_struct *mm = vma->vm_mm;
 	unsigned long addr = start;
@@ -178,7 +188,7 @@ static long __mlock_vma_pages_range(struct vm_area_struct *vma,
 	if (vma->vm_flags & (VM_READ | VM_WRITE | VM_EXEC))
 		gup_flags |= FOLL_FORCE;
 
-	return __get_user_pages(current, mm, addr, nr_pages, gup_flags,
+	return __get_user_pages(tsk, mm, addr, nr_pages, gup_flags,
 				NULL, NULL, nonblocking);
 }
 
@@ -207,8 +217,8 @@ static int __mlock_posix_error_return(long retval)
  * return number of pages [> 0] to be removed from locked_vm on success
  * of "special" vmas.
  */
-long mlock_vma_pages_range(struct vm_area_struct *vma,
-			unsigned long start, unsigned long end)
+long mlock_vma_pages_range_tsk(struct task_struct *tsk,
+		struct vm_area_struct *vma, unsigned long start, unsigned long end)
 {
 	int nr_pages = (end - start) / PAGE_SIZE;
 	BUG_ON(!(vma->vm_flags & VM_LOCKED));
@@ -221,9 +231,9 @@ long mlock_vma_pages_range(struct vm_area_struct *vma,
 
 	if (!((vma->vm_flags & (VM_DONTEXPAND | VM_RESERVED)) ||
 			is_vm_hugetlb_page(vma) ||
-			vma == get_gate_vma(current->mm))) {
+			vma == get_gate_vma(tsk->mm))) {
 
-		__mlock_vma_pages_range(vma, start, end, NULL);
+		__mlock_vma_pages_range(tsk, vma, start, end, NULL);
 
 		/* Hide errors from mmap() and other callers */
 		return 0;
@@ -237,7 +247,7 @@ long mlock_vma_pages_range(struct vm_area_struct *vma,
 	 * locked limit.  huge pages are already counted against
 	 * locked vm limit.
 	 */
-	make_pages_present(start, end);
+	make_pages_present_tsk(tsk, start, end);
 
 no_mlock:
 	vma->vm_flags &= ~VM_LOCKED;	/* and don't come back! */
@@ -364,7 +374,7 @@ out:
 	return ret;
 }
 
-static int do_mlock(unsigned long start, size_t len, int on)
+static int do_mlock(struct task_struct *tsk, unsigned long start, size_t len, int on)
 {
 	unsigned long nstart, end, tmp;
 	struct vm_area_struct * vma, * prev;
@@ -377,7 +387,7 @@ static int do_mlock(unsigned long start, size_t len, int on)
 		return -EINVAL;
 	if (end == start)
 		return 0;
-	vma = find_vma_prev(current->mm, start, &prev);
+	vma = find_vma_prev(tsk->mm, start, &prev);
 	if (!vma || vma->vm_start > start)
 		return -ENOMEM;
 
@@ -414,9 +424,10 @@ static int do_mlock(unsigned long start, size_t len, int on)
 	return error;
 }
 
-static int do_mlock_pages(unsigned long start, size_t len, int ignore_errors)
+static int do_mlock_pages(struct task_struct *tsk,
+		unsigned long start, size_t len, int ignore_errors)
 {
-	struct mm_struct *mm = current->mm;
+	struct mm_struct *mm = tsk->mm;
 	unsigned long end, nstart, nend;
 	struct vm_area_struct *vma = NULL;
 	int locked = 0;
@@ -453,7 +464,7 @@ static int do_mlock_pages(unsigned long start, size_t len, int ignore_errors)
 		 * double checks the vma flags, so that it won't mlock pages
 		 * if the vma was already munlocked.
 		 */
-		ret = __mlock_vma_pages_range(vma, nstart, nend, &locked);
+		ret = __mlock_vma_pages_range(tsk, vma, nstart, nend, &locked);
 		if (ret < 0) {
 			if (ignore_errors) {
 				ret = 0;
@@ -493,10 +504,10 @@ SYSCALL_DEFINE2(mlock, unsigned long, start, size_t, len)
 
 	/* check against resource limits */
 	if ((locked <= lock_limit) || capable(CAP_IPC_LOCK))
-		error = do_mlock(start, len, 1);
+		error = do_mlock(current, start, len, 1);
 	up_write(&current->mm->mmap_sem);
 	if (!error)
-		error = do_mlock_pages(start, len, 0);
+		error = do_mlock_pages(current, start, len, 0);
 	return error;
 }
 
@@ -507,7 +518,7 @@ SYSCALL_DEFINE2(munlock, unsigned long, start, size_t, len)
 	down_write(&current->mm->mmap_sem);
 	len = PAGE_ALIGN(len + (start & ~PAGE_MASK));
 	start &= PAGE_MASK;
-	ret = do_mlock(start, len, 0);
+	ret = do_mlock(current, start, len, 0);
 	up_write(&current->mm->mmap_sem);
 	return ret;
 }
@@ -563,7 +574,7 @@ SYSCALL_DEFINE1(mlockall, int, flags)
 	up_write(&current->mm->mmap_sem);
 	if (!ret && (flags & MCL_CURRENT)) {
 		/* Ignore errors */
-		do_mlock_pages(0, TASK_SIZE, 1);
+		do_mlock_pages(current, 0, TASK_SIZE, 1);
 	}
 out:
 	return ret;

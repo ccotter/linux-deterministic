@@ -271,7 +271,7 @@ create_elf_tables(struct linux_binprm *bprm, struct elfhdr *exec,
 	 * Grow the stack manually; some architectures have a limit on how
 	 * far ahead a user-space access may be in order to grow the stack.
 	 */
-	vma = find_extend_vma(current->mm, bprm->p);
+	vma = find_extend_vma_tsk(current, current->mm, bprm->p);
 	if (!vma)
 		return -EFAULT;
 
@@ -341,11 +341,11 @@ static unsigned long elf_map(struct file *filep, unsigned long addr,
 	*/
 	if (total_size) {
 		total_size = ELF_PAGEALIGN(total_size);
-		map_addr = do_mmap(filep, addr, total_size, prot, type, off);
+		map_addr = do_mmap_tsk(current, filep, addr, total_size, prot, type, off);
 		if (!BAD_ADDR(map_addr))
 			do_munmap(current->mm, map_addr+size, total_size-size);
 	} else
-		map_addr = do_mmap(filep, addr, size, prot, type, off);
+		map_addr = do_mmap_tsk(current, filep, addr, size, prot, type, off);
 
 	up_write(&current->mm->mmap_sem);
 	return(map_addr);
@@ -956,7 +956,7 @@ static int load_elf_binary(struct linux_binprm *bprm, struct pt_regs *regs)
 		   Since we do not have the power to recompile these, we
 		   emulate the SVr4 behavior. Sigh. */
 		down_write(&current->mm->mmap_sem);
-		error = do_mmap(NULL, 0, PAGE_SIZE, PROT_READ | PROT_EXEC,
+		error = do_mmap_tsk(current, NULL, 0, PAGE_SIZE, PROT_READ | PROT_EXEC,
 				MAP_FIXED | MAP_PRIVATE, 0);
 		up_write(&current->mm->mmap_sem);
 	}
@@ -1044,7 +1044,7 @@ static int load_elf_library(struct file *file)
 
 	/* Now use mmap to map the library into memory. */
 	down_write(&current->mm->mmap_sem);
-	error = do_mmap(file,
+	error = do_mmap_tsk(current, file,
 			ELF_PAGESTART(eppnt->p_vaddr),
 			(eppnt->p_filesz +
 			 ELF_PAGEOFFSET(eppnt->p_vaddr)),

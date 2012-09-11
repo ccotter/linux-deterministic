@@ -1086,6 +1086,12 @@ EXPORT_SYMBOL(complete_and_exit);
 
 SYSCALL_DEFINE1(exit, int, error_code)
 {
+	/* TODO disallow deterministic being able to kill itself. */
+	if (is_deterministic(current)) {
+		spin_lock(&current->d_spinlock);
+		atomic_set(&current->d_status, DET_S_EXIT_NORMAL);
+		spin_unlock(&current->d_spinlock);
+	}
 	do_exit((error_code&0xff)<<8);
 }
 

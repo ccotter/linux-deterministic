@@ -58,10 +58,10 @@ static void find_start_end(unsigned long flags, unsigned long *begin,
 }
 
 unsigned long
-arch_get_unmapped_area(struct file *filp, unsigned long addr,
+arch_get_unmapped_area_tsk(struct task_struct *tsk, struct file *filp, unsigned long addr,
 		unsigned long len, unsigned long pgoff, unsigned long flags)
 {
-	struct mm_struct *mm = current->mm;
+	struct mm_struct *mm = tsk->mm;
 	struct vm_area_struct *vma;
 	unsigned long start_addr;
 	unsigned long begin, end;
@@ -122,12 +122,12 @@ full_search:
 
 
 unsigned long
-arch_get_unmapped_area_topdown(struct file *filp, const unsigned long addr0,
+arch_get_unmapped_area_topdown_tsk(struct task_struct *tsk, struct file *filp, const unsigned long addr0,
 			  const unsigned long len, const unsigned long pgoff,
 			  const unsigned long flags)
 {
 	struct vm_area_struct *vma;
-	struct mm_struct *mm = current->mm;
+	struct mm_struct *mm = tsk->mm;
 	unsigned long addr = addr0;
 
 	/* requested length too big for entire address space */
@@ -200,7 +200,7 @@ bottomup:
 	 */
 	mm->cached_hole_size = ~0UL;
 	mm->free_area_cache = TASK_UNMAPPED_BASE;
-	addr = arch_get_unmapped_area(filp, addr0, len, pgoff, flags);
+	addr = arch_get_unmapped_area_tsk(tsk, filp, addr0, len, pgoff, flags);
 	/*
 	 * Restore the topdown base:
 	 */

@@ -127,10 +127,10 @@ out:
 
 #ifndef HAVE_ARCH_HUGETLB_UNMAPPED_AREA
 static unsigned long
-hugetlb_get_unmapped_area(struct file *file, unsigned long addr,
+hugetlb_get_unmapped_area(struct task_struct *tsk, struct file *file, unsigned long addr,
 		unsigned long len, unsigned long pgoff, unsigned long flags)
 {
-	struct mm_struct *mm = current->mm;
+	struct mm_struct *mm = tsk->mm;
 	struct vm_area_struct *vma;
 	unsigned long start_addr;
 	struct hstate *h = hstate_file(file);

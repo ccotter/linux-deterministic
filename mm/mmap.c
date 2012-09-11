@@ -947,11 +947,12 @@ void vm_stat_account(struct mm_struct *mm, unsigned long flags,
  * The caller must hold down_write(&current->mm->mmap_sem).
  */
 
-unsigned long do_mmap_pgoff(struct file *file, unsigned long addr,
-			unsigned long len, unsigned long prot,
-			unsigned long flags, unsigned long pgoff)
+unsigned long do_mmap_pgoff_tsk(struct task_struct *tsk,
+		struct file *file, unsigned long addr,
+		unsigned long len, unsigned long prot,
+		unsigned long flags, unsigned long pgoff)
 {
-	struct mm_struct * mm = current->mm;
+	struct mm_struct * mm = tsk->mm;
 	struct inode *inode;
 	vm_flags_t vm_flags;
 	int error;
@@ -963,7 +964,7 @@ unsigned long do_mmap_pgoff(struct file *file, unsigned long addr,
 	 * (the exception is when the underlying filesystem is noexec
 	 *  mounted, in which case we dont add PROT_EXEC.)
 	 */
-	if ((prot & PROT_READ) && (current->personality & READ_IMPLIES_EXEC))
+	if ((prot & PROT_READ) && (tsk->personality & READ_IMPLIES_EXEC))
 		if (!(file && (file->f_path.mnt->mnt_flags & MNT_NOEXEC)))
 			prot |= PROT_EXEC;
 
@@ -989,7 +990,7 @@ unsigned long do_mmap_pgoff(struct file *file, unsigned long addr,
 	/* Obtain the address to map to. we verify (or select) it and ensure
 	 * that it represents a valid section of the address space.
 	 */
-	addr = get_unmapped_area(file, addr, len, pgoff, flags);
+	addr = get_unmapped_area_tsk(tsk, file, addr, len, pgoff, flags);
 	if (addr & ~PAGE_MASK)
 		return addr;
 
@@ -1001,7 +1002,7 @@ unsigned long do_mmap_pgoff(struct file *file, unsigned long addr,
 			mm->def_flags | VM_MAYREAD | VM_MAYWRITE | VM_MAYEXEC;
 
 	if (flags & MAP_LOCKED)
-		if (!can_do_mlock())
+		if (!can_do_mlock_tsk(tsk))
 			return -EPERM;
 
 	/* mlock MCL_FUTURE? */
@@ -1011,7 +1012,7 @@ unsigned long do_mmap_pgoff(struct file *file, unsigned long addr,
 		locked += mm->locked_vm;
 		lock_limit = rlimit(RLIMIT_MEMLOCK);
 		lock_limit >>= PAGE_SHIFT;
-		if (locked > lock_limit && !capable(CAP_IPC_LOCK))
+		if (locked > lock_limit && !has_capability(tsk, CAP_IPC_LOCK))
 			return -EAGAIN;
 	}
 
@@ -1077,17 +1078,20 @@ unsigned long do_mmap_pgoff(struct file *file, unsigned long addr,
 		}
 	}
 
-	error = security_file_mmap(file, reqprot, prot, flags, addr, 0);
-	if (error)
-		return error;
+	/* TODO */
+	if (current == tsk) {
+		error = security_file_mmap(file, reqprot, prot, flags, addr, 0);
+		if (error)
+			return error;
+	}
 
-	return mmap_region(file, addr, len, flags, vm_flags, pgoff);
+	return mmap_region_tsk(tsk, file, addr, len, flags, vm_flags, pgoff);
 }
-EXPORT_SYMBOL(do_mmap_pgoff);
+EXPORT_SYMBOL(do_mmap_pgoff_tsk);
 
-SYSCALL_DEFINE6(mmap_pgoff, unsigned long, addr, unsigned long, len,
-		unsigned long, prot, unsigned long, flags,
-		unsigned long, fd, unsigned long, pgoff)
+long sys_mmap_pgoff_tsk(struct task_struct *tsk, unsigned long addr,
+		unsigned long len, unsigned long prot, unsigned long flags,
+		unsigned long fd, unsigned long pgoff)
 {
 	struct file *file = NULL;
 	unsigned long retval = -EBADF;
@@ -1116,14 +1120,21 @@ SYSCALL_DEFINE6(mmap_pgoff, unsigned long, addr, unsigned long, len,
 
 	flags &= ~(MAP_EXECUTABLE | MAP_DENYWRITE);
 
-	down_write(&current->mm->mmap_sem);
-	retval = do_mmap_pgoff(file, addr, len, prot, flags, pgoff);
-	up_write(&current->mm->mmap_sem);
+	down_write(&tsk->mm->mmap_sem);
+	retval = do_mmap_pgoff_tsk(tsk, file, addr, len, prot, flags, pgoff);
+	up_write(&tsk->mm->mmap_sem);
 
 	if (file)
 		fput(file);
 out:
 	return retval;
+}
+
+SYSCALL_DEFINE6(mmap_pgoff, unsigned long, addr, unsigned long, len,
+		unsigned long, prot, unsigned long, flags,
+		unsigned long, fd, unsigned long, pgoff)
+{
+	return sys_mmap_pgoff_tsk(current, addr, len, prot, flags, fd, pgoff);
 }
 
 #ifdef __ARCH_WANT_SYS_OLD_MMAP
@@ -1198,11 +1209,12 @@ static inline int accountable_mapping(struct file *file, vm_flags_t vm_flags)
 	return (vm_flags & (VM_NORESERVE | VM_SHARED | VM_WRITE)) == VM_WRITE;
 }
 
-unsigned long mmap_region(struct file *file, unsigned long addr,
-			  unsigned long len, unsigned long flags,
-			  vm_flags_t vm_flags, unsigned long pgoff)
+unsigned long mmap_region_tsk(struct task_struct *tsk,
+		struct file *file, unsigned long addr,
+		unsigned long len, unsigned long flags,
+		vm_flags_t vm_flags, unsigned long pgoff)
 {
-	struct mm_struct *mm = current->mm;
+	struct mm_struct *mm = tsk->mm;
 	struct vm_area_struct *vma, *prev;
 	int correct_wcount = 0;
 	int error;
@@ -1215,13 +1227,13 @@ unsigned long mmap_region(struct file *file, unsigned long addr,
 munmap_back:
 	vma = find_vma_prepare(mm, addr, &prev, &rb_link, &rb_parent);
 	if (vma && vma->vm_start < addr + len) {
-		if (do_munmap(mm, addr, len))
+		if (do_munmap(mm, addr, len)) /* TODO */
 			return -ENOMEM;
 		goto munmap_back;
 	}
 
 	/* Check against address space limit. */
-	if (!may_expand_vm(mm, len >> PAGE_SHIFT))
+	if (!may_expand_vm(tsk, mm, len >> PAGE_SHIFT))
 		return -ENOMEM;
 
 	/*
@@ -1243,7 +1255,7 @@ munmap_back:
 	 */
 	if (accountable_mapping(file, vm_flags)) {
 		charged = len >> PAGE_SHIFT;
-		if (security_vm_enough_memory(charged))
+		if (security_vm_enough_memory(charged)) /* TODO */
 			return -ENOMEM;
 		vm_flags |= VM_ACCOUNT;
 	}
@@ -1251,6 +1263,7 @@ munmap_back:
 	/*
 	 * Can we just expand an old mapping?
 	 */
+	/* TODO double check */
 	vma = vma_merge(mm, prev, addr, addr + len, vm_flags, NULL, file, pgoff, NULL);
 	if (vma)
 		goto out;
@@ -1333,10 +1346,10 @@ out:
 	mm->total_vm += len >> PAGE_SHIFT;
 	vm_stat_account(mm, vm_flags, file, len >> PAGE_SHIFT);
 	if (vm_flags & VM_LOCKED) {
-		if (!mlock_vma_pages_range(vma, addr, addr + len))
+		if (!mlock_vma_pages_range_tsk(tsk, vma, addr, addr + len))
 			mm->locked_vm += (len >> PAGE_SHIFT);
 	} else if ((flags & MAP_POPULATE) && !(flags & MAP_NONBLOCK))
-		make_pages_present(addr, addr + len);
+		make_pages_present_tsk(tsk, addr, addr + len);
 	return addr;
 
 unmap_and_free_vma:
@@ -1369,10 +1382,10 @@ unacct_error:
  */
 #ifndef HAVE_ARCH_UNMAPPED_AREA
 unsigned long
-arch_get_unmapped_area(struct file *filp, unsigned long addr,
+arch_get_unmapped_area_tsk(struct task_struct *tsk, struct file *filp, unsigned long addr,
 		unsigned long len, unsigned long pgoff, unsigned long flags)
 {
-	struct mm_struct *mm = current->mm;
+	struct mm_struct *mm = tsk->mm;
 	struct vm_area_struct *vma;
 	unsigned long start_addr;
 
@@ -1443,12 +1456,13 @@ void arch_unmap_area(struct mm_struct *mm, unsigned long addr)
  */
 #ifndef HAVE_ARCH_UNMAPPED_AREA_TOPDOWN
 unsigned long
-arch_get_unmapped_area_topdown(struct file *filp, const unsigned long addr0,
-			  const unsigned long len, const unsigned long pgoff,
-			  const unsigned long flags)
+arch_get_unmapped_area_topdown_tsk(struct task_struct *tsk,
+		struct file *filp, const unsigned long addr0,
+		const unsigned long len, const unsigned long pgoff,
+		const unsigned long flags)
 {
 	struct vm_area_struct *vma;
-	struct mm_struct *mm = current->mm;
+	struct mm_struct *mm = tsk->mm;
 	unsigned long addr = addr0;
 
 	/* requested length too big for entire address space */
@@ -1517,7 +1531,7 @@ bottomup:
 	 */
 	mm->cached_hole_size = ~0UL;
   	mm->free_area_cache = TASK_UNMAPPED_BASE;
-	addr = arch_get_unmapped_area(filp, addr0, len, pgoff, flags);
+	addr = arch_get_unmapped_area_tsk(tsk, filp, addr0, len, pgoff, flags);
 	/*
 	 * Restore the topdown base:
 	 */
@@ -1542,11 +1556,12 @@ void arch_unmap_area_topdown(struct mm_struct *mm, unsigned long addr)
 }
 
 unsigned long
-get_unmapped_area(struct file *file, unsigned long addr, unsigned long len,
+get_unmapped_area_tsk(struct task_struct *tsk, struct file *file, unsigned long addr, unsigned long len,
 		unsigned long pgoff, unsigned long flags)
 {
-	unsigned long (*get_area)(struct file *, unsigned long,
-				  unsigned long, unsigned long, unsigned long);
+	unsigned long (*get_area)(struct task_struct *,
+			struct file *, unsigned long,
+			unsigned long, unsigned long, unsigned long);
 
 	unsigned long error = arch_mmap_check(addr, len, flags);
 	if (error)
@@ -1556,10 +1571,10 @@ get_unmapped_area(struct file *file, unsigned long addr, unsigned long len,
 	if (len > TASK_SIZE)
 		return -ENOMEM;
 
-	get_area = current->mm->get_unmapped_area;
+	get_area = tsk->mm->get_unmapped_area;
 	if (file && file->f_op && file->f_op->get_unmapped_area)
 		get_area = file->f_op->get_unmapped_area;
-	addr = get_area(file, addr, len, pgoff, flags);
+	addr = get_area(tsk, file, addr, len, pgoff, flags);
 	if (IS_ERR_VALUE(addr))
 		return addr;
 
@@ -1570,8 +1585,7 @@ get_unmapped_area(struct file *file, unsigned long addr, unsigned long len,
 
 	return arch_rebalance_pgtables(addr, len);
 }
-
-EXPORT_SYMBOL(get_unmapped_area);
+EXPORT_SYMBOL(get_unmapped_area_tsk);
 
 /* Look up the first VMA which satisfies  addr < vm_end,  NULL if none. */
 struct vm_area_struct *find_vma(struct mm_struct *mm, unsigned long addr)
@@ -1658,7 +1672,7 @@ static int acct_stack_growth(struct vm_area_struct *vma, unsigned long size, uns
 	unsigned long new_start;
 
 	/* address space limit tests */
-	if (!may_expand_vm(mm, grow))
+	if (!may_expand_vm(current, mm, grow))
 		return -ENOMEM;
 
 	/* Stack limit test */
@@ -1810,7 +1824,8 @@ int expand_stack(struct vm_area_struct *vma, unsigned long address)
 }
 
 struct vm_area_struct *
-find_extend_vma(struct mm_struct *mm, unsigned long addr)
+find_extend_vma_tsk(struct task_struct *tsk, struct mm_struct *mm,
+		unsigned long addr)
 {
 	struct vm_area_struct *vma, *prev;
 
@@ -1821,7 +1836,7 @@ find_extend_vma(struct mm_struct *mm, unsigned long addr)
 	if (!prev || expand_stack(prev, addr))
 		return NULL;
 	if (prev->vm_flags & VM_LOCKED) {
-		mlock_vma_pages_range(prev, addr, prev->vm_end);
+		mlock_vma_pages_range_tsk(tsk, prev, addr, prev->vm_end);
 	}
 	return prev;
 }
@@ -1832,7 +1847,8 @@ int expand_stack(struct vm_area_struct *vma, unsigned long address)
 }
 
 struct vm_area_struct *
-find_extend_vma(struct mm_struct * mm, unsigned long addr)
+find_extend_vma_tsk(struct task_struct *tsk, struct mm_struct * mm,
+		unsigned long addr)
 {
 	struct vm_area_struct * vma;
 	unsigned long start;
@@ -1849,7 +1865,7 @@ find_extend_vma(struct mm_struct * mm, unsigned long addr)
 	if (expand_stack(vma, addr))
 		return NULL;
 	if (vma->vm_flags & VM_LOCKED) {
-		mlock_vma_pages_range(vma, addr, start);
+		mlock_vma_pages_range_tsk(tsk, vma, addr, start);
 	}
 	return vma;
 }
@@ -2156,7 +2172,7 @@ unsigned long do_brk(unsigned long addr, unsigned long len)
 
 	flags = VM_DATA_DEFAULT_FLAGS | VM_ACCOUNT | mm->def_flags;
 
-	error = get_unmapped_area(NULL, addr, len, 0, MAP_FIXED);
+	error = get_unmapped_area_tsk(current, NULL, addr, len, 0, MAP_FIXED);
 	if (error & ~PAGE_MASK)
 		return error;
 
@@ -2191,7 +2207,7 @@ unsigned long do_brk(unsigned long addr, unsigned long len)
 	}
 
 	/* Check against address space limits *after* clearing old maps... */
-	if (!may_expand_vm(mm, len >> PAGE_SHIFT))
+	if (!may_expand_vm(current, mm, len >> PAGE_SHIFT))
 		return -ENOMEM;
 
 	if (mm->map_count > sysctl_max_map_count)
@@ -2227,7 +2243,7 @@ out:
 	perf_event_mmap(vma);
 	mm->total_vm += len >> PAGE_SHIFT;
 	if (flags & VM_LOCKED) {
-		if (!mlock_vma_pages_range(vma, addr, addr + len))
+		if (!mlock_vma_pages_range_tsk(current, vma, addr, addr + len))
 			mm->locked_vm += (len >> PAGE_SHIFT);
 	}
 	return addr;
@@ -2385,12 +2401,12 @@ struct vm_area_struct *copy_vma(struct vm_area_struct **vmap,
  * Return true if the calling process may expand its vm space by the passed
  * number of pages
  */
-int may_expand_vm(struct mm_struct *mm, unsigned long npages)
+int may_expand_vm(struct task_struct *tsk, struct mm_struct *mm, unsigned long npages)
 {
 	unsigned long cur = mm->total_vm;	/* pages */
 	unsigned long lim;
 
-	lim = rlimit(RLIMIT_AS) >> PAGE_SHIFT;
+	lim = task_rlimit(tsk, RLIMIT_AS) >> PAGE_SHIFT;
 
 	if (cur + npages > lim)
 		return 0;

@@ -11,6 +11,11 @@ static inline void deterministic_notify_parent(struct task_struct *tsk)
     wake_up_process(tsk);
 }
 
+static inline void forget_det_child(struct task_struct *child)
+{
+	child->d_pid = -1;
+}
+
 /* Marks a deterministic process and its children as poisoned. All marked
  * child processes are killed immediately, and the marked parent task is
  * stopped from ever running again. This process is kept around until its
@@ -37,6 +42,13 @@ extern long deterministic_get_regs(struct task_struct *dst,
 #define DET_GET_STATUS           3
 #define DET_KILL                 4
 #define DET_ALLOW_SIGNALS        5
+#define DET_VM_ZERO              6
+#define DET_MAX_OPERATION        7
+
+static inline int is_valid_det_op(unsigned long op)
+{
+	return 0 <= op && op < DET_MAX_OPERATION;
+}
 
 #define DET_START                (0x0001L << 16)
 #define DET_DEBUG                (0x8000L << 16)

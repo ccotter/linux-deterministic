@@ -1658,7 +1658,7 @@ int __get_user_pages(struct task_struct *tsk, struct mm_struct *mm,
 	do {
 		struct vm_area_struct *vma;
 
-		vma = find_extend_vma(mm, start);
+		vma = find_extend_vma_tsk(tsk, mm, start);
 		if (!vma && in_gate_area(mm, start)) {
 			unsigned long pg = start & PAGE_MASK;
 			pgd_t *pgd;
@@ -3499,12 +3499,12 @@ int __pmd_alloc(struct mm_struct *mm, pud_t *pud, unsigned long address)
 }
 #endif /* __PAGETABLE_PMD_FOLDED */
 
-int make_pages_present(unsigned long addr, unsigned long end)
+int make_pages_present_tsk(struct task_struct *tsk, unsigned long addr, unsigned long end)
 {
 	int ret, len, write;
 	struct vm_area_struct * vma;
 
-	vma = find_vma(current->mm, addr);
+	vma = find_vma(tsk->mm, addr);
 	if (!vma)
 		return -ENOMEM;
 	/*
@@ -3516,7 +3516,7 @@ int make_pages_present(unsigned long addr, unsigned long end)
 	BUG_ON(addr >= end);
 	BUG_ON(end > vma->vm_end);
 	len = DIV_ROUND_UP(end, PAGE_SIZE) - addr/PAGE_SIZE;
-	ret = get_user_pages(current, current->mm, addr,
+	ret = get_user_pages(tsk, tsk->mm, addr,
 			len, write, 0, NULL, NULL);
 	if (ret < 0)
 		return ret;

@@ -286,12 +286,12 @@ static int shm_fsync(struct file *file, int datasync)
 	return sfd->file->f_op->fsync(sfd->file, datasync);
 }
 
-static unsigned long shm_get_unmapped_area(struct file *file,
-	unsigned long addr, unsigned long len, unsigned long pgoff,
-	unsigned long flags)
+static unsigned long shm_get_unmapped_area(struct task_struct *tsk,
+		struct file *file, unsigned long addr, unsigned long len,
+		unsigned long pgoff, unsigned long flags)
 {
 	struct shm_file_data *sfd = shm_file_data(file);
-	return sfd->file->f_op->get_unmapped_area(sfd->file, addr, len,
+	return sfd->file->f_op->get_unmapped_area(tsk, sfd->file, addr, len,
 						pgoff, flags);
 }
 
@@ -935,7 +935,7 @@ long do_shmat(int shmid, char __user *shmaddr, int shmflg, ulong *raddr)
 			goto invalid;
 	}
 		
-	user_addr = do_mmap (file, addr, size, prot, flags, 0);
+	user_addr = do_mmap_tsk(current, file, addr, size, prot, flags, 0);
 	*raddr = user_addr;
 	err = 0;
 	if (IS_ERR_VALUE(user_addr))

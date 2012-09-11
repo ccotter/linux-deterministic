@@ -85,7 +85,7 @@ int arch_setup_additional_pages(struct linux_binprm *bprm, int uses_interp)
 
 	down_write(&mm->mmap_sem);
 	addr = vdso_addr(mm->start_stack, vdso_size);
-	addr = get_unmapped_area(NULL, addr, vdso_size, 0, 0);
+	addr = get_unmapped_area_tsk(current, NULL, addr, vdso_size, 0, 0);
 	if (IS_ERR_VALUE(addr)) {
 		ret = addr;
 		goto up_fail;

@@ -12,8 +12,13 @@
 #include <linux/syscalls.h>
 #include <linux/sched.h>
 #include <linux/regset.h>
+#include <linux/mman.h>
+#include <linux/highmem.h>
 
 #include <asm/syscall.h>
+
+#define DET_MAP_FLAGS (MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS)
+#define LOWER_PAGE(addr) PAGE_ALIGN((addr) + 1 - PAGE_SIZE)
 
 static inline int get_child_status(struct task_struct *child)
 {
@@ -25,7 +30,7 @@ find_deterministic_child(struct task_struct *tsk, pid_t dpid)
 {
 	struct task_struct *p;
 	/* O(N) runtime, very slow. TODO make faster */
-	list_for_each_entry(p, &current->children, sibling) {
+	list_for_each_entry(p, &tsk->children, sibling) {
 		if (dpid == p->d_pid && tsk == p->parent) {
 			return p;
 		}
@@ -129,7 +134,109 @@ static int wait_for_det_zombie(struct task_struct *tsk)
 {
 	/* Just use sys_wait4! Easy! */
 	tsk->exit_signal = SIGCHLD;
-	printk("RET IS %d\n", sys_wait4(tsk->pid, NULL, 0, NULL));
+	return sys_wait4(tsk->pid, NULL, 0, NULL);
+}
+
+/* Caller must kunmap_atomic() the mapped address. */
+static inline void *pin_one_page_atomic(struct mm_struct *mm,
+		unsigned long addr, struct page **page, int write)
+{
+	int ret = get_user_pages(NULL, mm, addr, 1 /* npages=1 */, write,
+			write /* force */, page, NULL);
+	if (ret > 0) {
+		return kmap_atomic(*page);
+	} else {
+		return NULL;
+	}
+}
+
+/* Assumes [addr, addr+len) is a subset of a single page.
+ * Returns 0 on success, otherwise a negative error code. This function will map a page if a mapping doesn't
+ * already exist. */
+static int manually_zero(struct task_struct *tsk, unsigned long addr,
+		unsigned long len, unsigned long prot)
+{
+	int ret;
+	unsigned long aligned;
+	void *vaddr;
+	struct mm_struct *mm = tsk->mm;
+	struct page *page;
+	struct vm_area_struct *vma;
+
+	vma = find_vma(mm, addr);
+	aligned = LOWER_PAGE(addr);
+	if (!vma || vma->vm_start > addr) {
+		/* Map the region ourselves. */
+		unsigned long rc = sys_mmap_pgoff_tsk(tsk, aligned, PAGE_SIZE, prot, DET_MAP_FLAGS, -1, 0);
+		if (rc != aligned)
+			return -ENOMEM; /* ??? */
+		else
+			return 0;
+	}
+
+	ret = -ENOMEM;
+	preempt_disable();
+	vaddr = pin_one_page_atomic(mm, aligned, &page, 1);
+	if (!vaddr)
+		goto ret;
+	vaddr += addr - aligned;
+	memset(vaddr, 0, len);
+	put_page(page);
+	kunmap_atomic(vaddr);
+	ret = 0;
+
+ret:
+	preempt_enable();
+	return ret;
+}
+
+/* Supports arbitrary start and end addresses.
+ * Returns 0 on success, otherwise a negative integer indicating the error. */
+static int do_vm_zero(struct task_struct *tsk, unsigned long addr,
+		unsigned long len, unsigned long prot)
+{
+	unsigned long start_page, end_page, end;
+
+	end = addr + len;
+	start_page = PAGE_ALIGN(addr);
+	end_page = LOWER_PAGE(end);
+
+	if (start_page > end_page) {
+		return manually_zero(tsk, addr, len, prot);
+	}
+
+	if (addr < start_page) {
+		/* Zero out pre page aligned region. */
+		unsigned long rc;
+		if (unlikely((rc = manually_zero(tsk, addr, start_page - addr, prot))))
+			return rc;
+	}
+
+	if (end_page < end) {
+		/* Zero out post page aligned region. */
+		unsigned long rc;
+		if (unlikely((rc = manually_zero(tsk, end_page, end - end_page, prot))))
+			return rc;
+	}
+
+	if (start_page == end_page)
+		return 0;
+
+	/* Now remap the region. */
+	addr = sys_mmap_pgoff_tsk(tsk, start_page, end_page - start_page, prot, DET_MAP_FLAGS, -1, 0);
+	if (addr != start_page) {
+		return -ENOMEM; /* ??? */
+	} else {
+		return 0;
+	}
+}
+
+/* Supports arbitrary start and end addresses.
+ * Returns 0 on success, otherwise a negative integer indicating the error. */
+static int do_vm_copy(struct task_struct *dst, struct task_struct *src,
+		unsigned long dstaddr, unsigned long addr, unsigned long len)
+{
+	return 0;
 }
 
 /*
@@ -172,7 +279,7 @@ SYSCALL_DEFINE6(dput, pid_t, child_dpid, unsigned long, flags, unsigned long, ad
 	opflags = 0xff00 & flags;
 	flags &= ~0xffffL;
 
-	if (!operation)
+	if (!is_valid_det_op(operation))
 		return -EINVAL;
 
 	if (DET_BECOME_MASTER == operation) {
@@ -195,6 +302,9 @@ SYSCALL_DEFINE6(dput, pid_t, child_dpid, unsigned long, flags, unsigned long, ad
 	child = find_deterministic_child(current, child_dpid);
 
 	if (!child) {
+		if (child_dpid < 0)
+			return -EINVAL;
+
 		/* We don't want a SIGCHLD signal when the child dies. */
 		ret = do_dfork(0, regs->sp, regs, 0, NULL, NULL, &child);
 		if (unlikely(ret < 0)) {
@@ -223,7 +333,6 @@ SYSCALL_DEFINE6(dput, pid_t, child_dpid, unsigned long, flags, unsigned long, ad
 		if (DET_KILL == operation && (opflags & DET_KILL_POISON) &&
 				DET_S_EXCEPT == child_status) {
 			wait_for_det_zombie(child);
-			printk("DID WAIT ZOMIB\n");
 			return DET_S_EXCEPT_DEAD;
 		}
 
@@ -245,11 +354,18 @@ SYSCALL_DEFINE6(dput, pid_t, child_dpid, unsigned long, flags, unsigned long, ad
 			atomic_set(&child->d_status, DET_S_EXIT_NORMAL);
 			child_status = DET_S_EXIT_NORMAL;
 			zap_det_process(child, 0);
+			forget_det_child(child);
 			break;
 		case DET_GET_STATUS:
 			break;
+		case DET_VM_ZERO:
+			ret = do_vm_zero(child, addr, size, opflags >> 8);
+			if (ret)
+				return ret;
+			break;
 	}
 
+	BUG_ON(ret < 0 || (ret & 0xff));
 	spin_lock(&child->d_spinlock);
 	if (DET_START & flags) {
 		atomic_set(&child->d_status, DET_S_RUNNING);
@@ -276,7 +392,7 @@ SYSCALL_DEFINE6(dget, pid_t, child_dpid, unsigned long, flags, unsigned long, ad
 	opflags = 0xff00 & flags;
 	flags &= ~0xffffL;
 
-	if (!operation)
+	if (!is_valid_det_op(operation))
 		return -EINVAL;
 
 	if (!is_deterministic_or_master(current)) {
@@ -320,6 +436,7 @@ SYSCALL_DEFINE6(dget, pid_t, child_dpid, unsigned long, flags, unsigned long, ad
 			break;
 	}
 
+	BUG_ON(ret < 0 || (ret & 0xff));
 	if (DET_START & flags) {
 		atomic_set(&child->d_status, DET_S_RUNNING);
 		wake_up_process(child);
