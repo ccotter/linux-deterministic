@@ -930,6 +930,11 @@ int walk_page_range(unsigned long addr, unsigned long end,
 		struct mm_walk *walk);
 void free_pgd_range(struct mmu_gather *tlb, unsigned long addr,
 		unsigned long end, unsigned long floor, unsigned long ceiling);
+int copy_page_range_dst(struct mm_struct *dst, struct mm_struct *src,
+			struct vm_area_struct *vma, unsigned long dst_addr, unsigned long addr,
+			unsigned long end);
+int copy_page_range_gen(struct mm_struct *dst, struct mm_struct *src,
+		struct vm_area_struct *vma, unsigned long addr, unsigned long end);
 int copy_page_range(struct mm_struct *dst, struct mm_struct *src,
 			struct vm_area_struct *vma);
 void unmap_mapping_range(struct address_space *mapping,

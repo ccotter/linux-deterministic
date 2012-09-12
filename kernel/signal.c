@@ -2111,7 +2111,6 @@ relock:
 					case SIGFPE:
 					case SIGSEGV:
 					case SIGILL:
-						printk("oh not!!!! %d\n",current->pid);
 						spin_lock(&current->d_spinlock);
 						mark_deterministic_poisoned(current);
 						spin_unlock(&current->d_spinlock);

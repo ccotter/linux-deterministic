@@ -13,6 +13,7 @@
 #include <linux/hugetlb.h>
 #include <linux/sched.h>
 #include <linux/ksm.h>
+#include <linux/determinism.h>
 
 /*
  * Any behaviour which results in changes to the vma->vm_flags needs to
@@ -67,6 +68,10 @@ static long madvise_behavior(struct vm_area_struct * vma,
 		break;
 	case MADV_MERGEABLE:
 	case MADV_UNMERGEABLE:
+		if (is_master(current)) {
+			error = -EPERM;
+			goto out;
+		}
 		error = ksm_madvise(vma, start, end, behavior, &new_flags);
 		if (error)
 			goto out;

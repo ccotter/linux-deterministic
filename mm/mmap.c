@@ -30,6 +30,7 @@
 #include <linux/perf_event.h>
 #include <linux/audit.h>
 #include <linux/khugepaged.h>
+#include <linux/determinism.h>
 
 #include <asm/uaccess.h>
 #include <asm/cacheflush.h>
@@ -1105,6 +1106,9 @@ long sys_mmap_pgoff_tsk(struct task_struct *tsk, unsigned long addr,
 			goto out;
 	} else if (flags & MAP_HUGETLB) {
 		struct user_struct *user = NULL;
+		if (is_master(tsk))
+			return -EPERM;
+
 		/*
 		 * VM_NORESERVE is used because the reservations will be
 		 * taken when vm_ops->mmap() is called

@@ -6,6 +6,11 @@
  *  See "Efficient System-Enforced Deterministic Parallelism."
  *  (http://dedis.cs.yale.edu/2010/det/papers/osdi10.pdf)
  *
+ * Author: Chris Cotter <ccotter@utexas.edu>
+ *
+ * See determinisim/LIMITATIONS for a list of limitations of this
+ * implementation.
+ *
  */
 
 #include <linux/determinism.h>
@@ -13,12 +18,35 @@
 #include <linux/sched.h>
 #include <linux/regset.h>
 #include <linux/mman.h>
+#include <asm/tlb.h>
 #include <linux/highmem.h>
 
 #include <asm/syscall.h>
 
 #define DET_MAP_FLAGS (MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS)
 #define LOWER_PAGE(addr) PAGE_ALIGN((addr) + 1 - PAGE_SIZE)
+
+/* Returns whether or not a process can become a master of a deterministic
+ * process group. */
+static int can_become_master(struct task_struct *tsk)
+{
+	struct mm_struct *mm = tsk->mm;
+	struct vm_area_struct *vma;
+	int ret = 0;
+
+	/* Scan memory mappings to ensure none can be mergeable for KSM.
+	 * Also check for HUGETLB mappings. */
+	down_read(&mm->mmap_sem);
+	for (vma = mm->mmap; vma; vma = vma->vm_next) {
+		if (vma->vm_flags & (VM_HUGETLB | VM_MERGEABLE))
+			goto ret;
+	}
+	ret = 1;
+
+ret:
+	up_read(&mm->mmap_sem);
+	return ret;
+}
 
 static inline int get_child_status(struct task_struct *child)
 {
@@ -139,12 +167,15 @@ static int wait_for_det_zombie(struct task_struct *tsk)
 
 /* Caller must kunmap_atomic() the mapped address. */
 static inline void *pin_one_page_atomic(struct mm_struct *mm,
-		unsigned long addr, struct page **page, int write)
+		unsigned long addr, int write, struct page **apage)
 {
+	struct page *page;
 	int ret = get_user_pages(NULL, mm, addr, 1 /* npages=1 */, write,
-			write /* force */, page, NULL);
+			write /* force */, &page, NULL);
+	if (apage)
+		*apage = page;
 	if (ret > 0) {
-		return kmap_atomic(*page);
+		return kmap_atomic(page);
 	} else {
 		return NULL;
 	}
@@ -153,7 +184,7 @@ static inline void *pin_one_page_atomic(struct mm_struct *mm,
 /* Assumes [addr, addr+len) is a subset of a single page.
  * Returns 0 on success, otherwise a negative error code. This function will map a page if a mapping doesn't
  * already exist. */
-static int manually_zero(struct task_struct *tsk, unsigned long addr,
+static inline int manually_zero(struct task_struct *tsk, unsigned long addr,
 		unsigned long len, unsigned long prot)
 {
 	int ret;
@@ -167,7 +198,8 @@ static int manually_zero(struct task_struct *tsk, unsigned long addr,
 	aligned = LOWER_PAGE(addr);
 	if (!vma || vma->vm_start > addr) {
 		/* Map the region ourselves. */
-		unsigned long rc = sys_mmap_pgoff_tsk(tsk, aligned, PAGE_SIZE, prot, DET_MAP_FLAGS, -1, 0);
+		unsigned long rc = do_mmap_pgoff_tsk(tsk, NULL, aligned, PAGE_SIZE, prot,
+				DET_MAP_FLAGS, 0);
 		if (rc != aligned)
 			return -ENOMEM; /* ??? */
 		else
@@ -176,7 +208,7 @@ static int manually_zero(struct task_struct *tsk, unsigned long addr,
 
 	ret = -ENOMEM;
 	preempt_disable();
-	vaddr = pin_one_page_atomic(mm, aligned, &page, 1);
+	vaddr = pin_one_page_atomic(mm, aligned, 1, &page);
 	if (!vaddr)
 		goto ret;
 	vaddr += addr - aligned;
@@ -191,52 +223,221 @@ ret:
 }
 
 /* Supports arbitrary start and end addresses.
+ *
+ * This function will zero out non page aligned regions of space using memset.
+ * The page aligned sub region will be mmap()ed. This has the effect of
+ * 1) unmapping any existing old regions and 2) telling the kernel to assign
+ * zero page frames via demand paging. Thus, this function only clears old
+ * page tables, and does not allocate pages until demanded by the process.
+ *
  * Returns 0 on success, otherwise a negative integer indicating the error. */
 static int do_vm_zero(struct task_struct *tsk, unsigned long addr,
 		unsigned long len, unsigned long prot)
 {
 	unsigned long start_page, end_page, end;
+	int ret = 0;
 
 	end = addr + len;
 	start_page = PAGE_ALIGN(addr);
 	end_page = LOWER_PAGE(end);
 
+	down_write(&tsk->mm->mmap_sem);
+
 	if (start_page > end_page) {
-		return manually_zero(tsk, addr, len, prot);
+		ret = manually_zero(tsk, addr, len, prot);
+		goto unlock;
 	}
 
 	if (addr < start_page) {
 		/* Zero out pre page aligned region. */
-		unsigned long rc;
-		if (unlikely((rc = manually_zero(tsk, addr, start_page - addr, prot))))
-			return rc;
+		if (unlikely((ret = manually_zero(tsk, addr, start_page - addr, prot))))
+			goto unlock;
 	}
 
 	if (end_page < end) {
 		/* Zero out post page aligned region. */
-		unsigned long rc;
-		if (unlikely((rc = manually_zero(tsk, end_page, end - end_page, prot))))
-			return rc;
+		if (unlikely((ret = manually_zero(tsk, end_page, end - end_page, prot))))
+			goto unlock;
 	}
 
 	if (start_page == end_page)
-		return 0;
+		goto unlock;
 
 	/* Now remap the region. */
-	addr = sys_mmap_pgoff_tsk(tsk, start_page, end_page - start_page, prot, DET_MAP_FLAGS, -1, 0);
-	if (addr != start_page) {
-		return -ENOMEM; /* ??? */
-	} else {
+	addr = do_mmap_pgoff_tsk(tsk, NULL, start_page, end_page - start_page, prot,
+			DET_MAP_FLAGS, 0);
+	if (addr != start_page)
+		ret = -ENOMEM; /* ??? */
+
+unlock:
+	up_write(&tsk->mm->mmap_sem);
+	return ret;
+}
+
+/* Will map the region in destination if it is not already mapped.
+ * Assumes a proper subset region strictly within a page. One of the boundaries
+ * of the region is assumed to be page aligned.
+ * Returns 0 iff success. */
+static inline int manually_copy(struct task_struct *dst, struct task_struct *src,
+		struct mm_struct *dmm, struct mm_struct *smm,
+		unsigned long dst_addr, unsigned long addr, unsigned long len)
+{
+	struct vm_area_struct *vma;
+	unsigned long prot;
+	unsigned long aligned = LOWER_PAGE(addr);
+	unsigned long dst_aligned = LOWER_PAGE(dst_addr);
+	int ret, off;
+	struct page *dpage, *spage;
+	void *daddr, *saddr;
+
+	/* Ensure source mapped. */
+	vma = find_vma(smm, addr);
+	if (!vma || vma->vm_start > addr)
 		return 0;
+
+	/* Do we need to map destination? */
+	prot = vma->vm_flags & (VM_READ|VM_WRITE|VM_EXEC);
+	vma = find_vma(dmm, dst_addr);
+	if (!vma || vma->vm_start > dst_addr) {
+		unsigned long ret = do_mmap_pgoff_tsk(dst, NULL, dst_aligned, PAGE_SIZE,
+				prot, DET_MAP_FLAGS, 0);
+		if (aligned != ret)
+			return -ENOMEM; /* ??? */
 	}
+
+	/* Ok, now map the two pages in kernel space and copy. */
+	ret = -ENOMEM;
+	preempt_disable();
+	saddr = pin_one_page_atomic(smm, aligned, 0, &spage);
+	if (!saddr)
+		goto ret;
+	daddr = pin_one_page_atomic(dmm, dst_aligned, 1, &dpage);
+	if (!daddr)
+		goto unmap;
+	off = addr - aligned;
+	memcpy(daddr + off, saddr + off, len);
+
+	/* TODO */
+	set_page_dirty_lock(dpage);
+	put_page(dpage);
+	kunmap_atomic(daddr);
+	ret = 0;
+
+unmap:
+	put_page(spage);
+	kunmap_atomic(saddr);
+ret:
+	preempt_enable();
+	return ret;
 }
 
 /* Supports arbitrary start and end addresses.
+ * Copies only regions mapped in source. Unmapped regions in the source
+ * descriptor will be silently ignored.
+ *
+ * This function considers three subests of [addr, addr+len) that partition
+ * [addr, addr+len). The first is the region starting from addr to the next
+ * page aligned address (which might be addr itself). The second is the page
+ * aligned region from the first page aligned address to the last page aligned
+ * address within [addr, add+len). The third is the region starting from the
+ * last page aligned address to addr+len-1. Any of the regions may be empty,
+ * but at least one will be non empty assuming len>0.
+ *
+ * Region two will be first unmapped in the destination, then all mapped regions
+ * in the source will be mapped identically in the destination via copy-on-write
+ * with the same memory access permissions as the source.
+ *
+ * The first and third regions will be mapped only if they were previously not
+ * mapped in the destination. If the regions were already mapped, then the
+ * memory access permissions of those regions will be unchanged, but the memory
+ * copied into the destination. Otherwise, the region will be mapped identically
+ * into the destination, and the data copied via memcpy (not copy-on-write).
+ * If we used COW, then we would actually copy more than the process asked.
+ *
  * Returns 0 on success, otherwise a negative integer indicating the error. */
 static int do_vm_copy(struct task_struct *dst, struct task_struct *src,
-		unsigned long dstaddr, unsigned long addr, unsigned long len)
+		unsigned long dst_addr, unsigned long addr, unsigned long len)
 {
-	return 0;
+	int ret = -ENOMEM;
+	struct mm_struct *dmm = dst->mm;
+	struct mm_struct *smm = src->mm;
+	unsigned long start_page, end_page, dst_start_page, dst_end_page;
+	unsigned long end = addr + len;
+	unsigned long dst_end = dst_addr + len;
+	struct vm_area_struct *vma;
+
+	if ((dst_addr - addr) & ~PAGE_MASK)
+		return -EINVAL;
+
+	down_write(&dmm->mmap_sem);
+	down_read(&smm->mmap_sem);
+
+	start_page = PAGE_ALIGN(addr);
+	end_page = LOWER_PAGE(end);
+	dst_start_page = PAGE_ALIGN(dst_addr);
+	dst_end_page = LOWER_PAGE(dst_end);
+
+	/* First, unmap destination. Only unmap page aligned subregion.
+	 * Then map VMAs to match those of the source. */
+	if (unlikely(do_munmap(dmm, dst_start_page, dst_end_page - dst_start_page)))
+		goto unlock;
+
+	if (start_page > end_page) {
+		ret = manually_copy(dst, src, dmm, smm, dst_addr, addr, len);
+		goto unlock;
+	}
+
+	if (addr < start_page) {
+		if (unlikely(ret = manually_copy(dst, src, dmm, smm,
+						dst_addr, addr, start_page - addr)))
+			goto unlock;
+	}
+
+	if (end_page < end) {
+		if (unlikely(ret = manually_copy(dst, src, dmm, smm,
+						dst_end_page, end_page, end - end_page)))
+			goto unlock;
+	}
+
+	if (start_page == end_page)
+		goto unlock;
+
+	/* Now, copy page aligned region copy-on-write style. */
+	addr = start_page;
+	end = end_page;
+	dst_addr = dst_start_page;
+	dst_end = dst_end_page;
+	ret = -ENOMEM;
+
+	flush_cache_mm(smm); /* TODO */
+	flush_cache_mm(dmm);
+
+	vma = find_vma(smm, addr);
+	printk("entering with %lx %lx %lx %lx\n", addr, end, dst_addr, dst_end);
+	while (vma && (vma->vm_start < end)) {
+		unsigned long prot = vma->vm_flags & (VM_READ|VM_WRITE|VM_EXEC);
+		unsigned long local_end = end < vma->vm_end ? end : vma->vm_end;
+		unsigned long local_len = local_end - addr;
+		printk("do mmap %lx %lx %lx %lx\n", dst_addr, local_len, local_end, 0L);
+		unsigned long rc = do_mmap_pgoff_tsk(dst, NULL, dst_addr, local_len,
+				prot, DET_MAP_FLAGS, 0);
+		if (rc != dst_addr)
+			goto flush;
+		if (unlikely(copy_page_range_dst(dmm, smm, vma, dst_addr, addr, local_end)))
+			goto flush;
+		dst_addr += local_len;
+		addr += local_len;
+		vma = vma->vm_next;
+	}
+	ret = 0;
+
+flush:
+	flush_tlb_all(); /* TODO */
+unlock:
+	up_read(&smm->mmap_sem);
+	up_write(&dmm->mmap_sem);
+
+	return ret;
 }
 
 /*
@@ -274,7 +475,7 @@ SYSCALL_DEFINE6(dput, pid_t, child_dpid, unsigned long, flags, unsigned long, ad
 	int child_status;
 	unsigned int operation;
 	unsigned long opflags;
-	
+
 	operation = 0xff & flags;
 	opflags = 0xff00 & flags;
 	flags &= ~0xffffL;
@@ -285,6 +486,10 @@ SYSCALL_DEFINE6(dput, pid_t, child_dpid, unsigned long, flags, unsigned long, ad
 	if (DET_BECOME_MASTER == operation) {
 		if (is_deterministic_or_master(current))
 			return -EPERM;
+		/* TODO Check for invalid process attributes. Ex: hugetlb mappings. */
+		if (!can_become_master(current)) {
+			return -EPERM;
+		}
 		current->d_flags = DET_MASTER;
 		return 0;
 	}
@@ -363,6 +568,11 @@ SYSCALL_DEFINE6(dput, pid_t, child_dpid, unsigned long, flags, unsigned long, ad
 			if (ret)
 				return ret;
 			break;
+		case DET_VM_COPY:
+			ret = do_vm_copy(child, current, dst, addr, size);
+			if (ret)
+				return ret;
+			break;
 	}
 
 	BUG_ON(ret < 0 || (ret & 0xff));
@@ -387,7 +597,7 @@ SYSCALL_DEFINE6(dget, pid_t, child_dpid, unsigned long, flags, unsigned long, ad
 	int child_status;
 	unsigned int operation;
 	unsigned long opflags;
-	
+
 	operation = 0xff & flags;
 	opflags = 0xff00 & flags;
 	flags &= ~0xffffL;

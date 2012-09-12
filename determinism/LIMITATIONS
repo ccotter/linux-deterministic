@@ -6,6 +6,34 @@ Overall limitations
   deterministic Linux or b) if my lack of explicit support for namespaces will
   lead to bugs, etc if namespaces are indeed used by a process.
 
+Memory subsystem
+
+  In general, memory operations only support anonymous, "normal" page table
+  mapped memory. Linux 3.0 supports HUGETLB (4MB pages explicitly requested
+  by a mmap() flag), transparent huge pages (4MB pages that the kernel
+  transparently allocates without the user knowing), and kernel samepage
+  mapping (KSM - a technique where the kernel transparently scans for matching
+  pages across processes and remaps COW style identical pages), among other
+  memory features.
+
+  These features complicate my implementation of memory operations. In some
+  cases, I explicitly disallow a memory operation from being performed when
+  these features are in place. For example, a process cannot COPY memory backed
+  by a HUGETLB memory region.
+
+  These limitations are a reflection of limited resources and a lack of
+  understanding needed to implement the deterministic memory operation with
+  respect to the given memory feature.
+
+  Current, my kernel is compiled with transparent hugetlb support and kernel
+  same page mapping. Any code that walked page tables will use the "hugetlb
+  split" API - this API automatically splits huge 4MB transparent pages for
+  parts of the kernel that don't support transparent hugetlb (like me).
+  
+  I explicitly disallow deterministic processes from using madvise() to allow
+  KSM from trying to remap identical pages. I also disallow mmap() from
+  supporting HUGETLB mappings.
+
 Improvements in code (runtime, memory, etc):
 
   Could kill ourselves faster in get_signal_to_deliver().
