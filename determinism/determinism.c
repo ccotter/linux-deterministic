@@ -413,12 +413,10 @@ static int do_vm_copy(struct task_struct *dst, struct task_struct *src,
 	flush_cache_mm(dmm);
 
 	vma = find_vma(smm, addr);
-	printk("entering with %lx %lx %lx %lx\n", addr, end, dst_addr, dst_end);
 	while (vma && (vma->vm_start < end)) {
 		unsigned long prot = vma->vm_flags & (VM_READ|VM_WRITE|VM_EXEC);
 		unsigned long local_end = end < vma->vm_end ? end : vma->vm_end;
 		unsigned long local_len = local_end - addr;
-		printk("do mmap %lx %lx %lx %lx\n", dst_addr, local_len, local_end, 0L);
 		unsigned long rc = do_mmap_pgoff_tsk(dst, NULL, dst_addr, local_len,
 				prot, DET_MAP_FLAGS, 0);
 		if (rc != dst_addr)

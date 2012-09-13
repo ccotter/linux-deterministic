@@ -973,11 +973,12 @@ int copy_pte_range_dst(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 	pte_t *orig_src_pte, *orig_dst_pte;
 	pte_t *src_pte, *dst_pte;
 	spinlock_t *src_ptl, *dst_ptl;
-	int progress = 0;
-	int do_reschedule;
+	int do_reschedule, progress, ret;
 	int rss[NR_MM_COUNTERS];
 	swp_entry_t entry = (swp_entry_t){0};
 
+	ret = 0;
+	progress = 0;
 again:
 	do_reschedule = 1;
 	init_rss_vec(rss);
@@ -1006,6 +1007,9 @@ again:
 		}
 		rc = update_dst_addrs(dst_mm, dst);
 		if (unlikely(rc < 0)) {
+			ret = -ENOMEM;
+			break;
+		} else if (rc) {
 			++progress;
 			do_reschedule = 0;
 			break;
@@ -1027,6 +1031,9 @@ again:
 	pte_unmap(orig_src_pte);
 	add_mm_rss_vec(dst_mm, rss);
 	pte_unmap_unlock(orig_dst_pte, dst_ptl);
+
+	if (ret)
+		return ret;
 
 	if (do_reschedule)
 		cond_resched();
