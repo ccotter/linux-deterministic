@@ -20,6 +20,7 @@
 #include <linux/mman.h>
 #include <asm/tlb.h>
 #include <linux/highmem.h>
+#include <linux/rmap.h>
 
 #include <asm/syscall.h>
 
@@ -52,28 +53,21 @@ static inline int get_child_status(struct task_struct *child)
 {
 	return atomic_read(&child->d_status);
 }
-
 static struct task_struct *
 find_deterministic_child(struct task_struct *tsk, pid_t dpid)
 {
-	struct task_struct *p;
+	struct task_struct *p, *found = NULL;
+	read_lock(&tasklist_lock);
 	/* O(N) runtime, very slow. TODO make faster */
 	list_for_each_entry(p, &tsk->children, sibling) {
 		if (dpid == p->d_pid && tsk == p->parent) {
-			return p;
+			found = p;
+			goto ret;
 		}
 	}
-	return NULL;
-}
-
-static inline int sigsets_overlap(const sigset_t *one, const sigset_t *two)
-{
-	size_t i, n = sizeof(one->sig);
-	for (i = 0; i < n; ++i) {
-		if (one->sig[i] & two->sig[i])
-			return 1;
-	}
-	return 0;
+ret:
+	read_unlock(&tasklist_lock);
+	return found;
 }
 
 /* Wait for a deterministic child to do a dret() or fault.
@@ -146,12 +140,8 @@ static long set_blocked_signals(struct task_struct *tsk, unsigned long addr, siz
 		return -EFAULT;
 
 	sigdelsetmask(&tmp, sigmask(SIGKILL)|sigmask(SIGSTOP));
-	if (sigisemptyset(&tmp)) {
-		tsk->d_flags &= ~DET_ALLOW_SIGNALS;
-	} else {
-		memcpy(&tsk->d_blocked, &tmp, sizeof(sigset_t));
-		tsk->d_flags |= DET_CUSTOM_SIGNALS;
-	}
+	memcpy(&tsk->d_blocked, &tmp, sizeof(sigset_t));
+	tsk->d_flags |= DET_CUSTOM_SIGNALS;
 	return 0;
 }
 
@@ -181,13 +171,21 @@ static inline void *pin_one_page_atomic(struct mm_struct *mm,
 	}
 }
 
+static inline struct page *pin_one_page_atomic_(struct mm_struct *mm,
+		unsigned long addr, int write)
+{
+	struct page *page;
+	int ret = get_user_pages(NULL, mm, addr, 1 /* nrpages=1*/, write,
+			write /* force */, &page, NULL);
+	return ret > 0 ? page : NULL;
+}
+
 /* Assumes [addr, addr+len) is a subset of a single page.
  * Returns 0 on success, otherwise a negative error code. This function will map a page if a mapping doesn't
  * already exist. */
 static inline int manually_zero(struct task_struct *tsk, unsigned long addr,
 		unsigned long len, unsigned long prot)
 {
-	int ret;
 	unsigned long aligned;
 	void *vaddr;
 	struct mm_struct *mm = tsk->mm;
@@ -206,20 +204,18 @@ static inline int manually_zero(struct task_struct *tsk, unsigned long addr,
 			return 0;
 	}
 
-	ret = -ENOMEM;
+	page = pin_one_page_atomic_(mm, aligned, 1);
+	if (!page)
+		return -ENOMEM;
+
 	preempt_disable();
-	vaddr = pin_one_page_atomic(mm, aligned, 1, &page);
-	if (!vaddr)
-		goto ret;
+	vaddr = kmap_atomic(page);
 	vaddr += addr - aligned;
 	memset(vaddr, 0, len);
-	put_page(page);
-	kunmap_atomic(vaddr);
-	ret = 0;
-
-ret:
 	preempt_enable();
-	return ret;
+
+	put_page(page);
+	return 0;
 }
 
 /* Supports arbitrary start and end addresses.
@@ -286,7 +282,7 @@ static inline int manually_copy(struct task_struct *dst, struct task_struct *src
 	unsigned long prot;
 	unsigned long aligned = LOWER_PAGE(addr);
 	unsigned long dst_aligned = LOWER_PAGE(dst_addr);
-	int ret, off;
+	int ret = -ENOMEM, off;
 	struct page *dpage, *spage;
 	void *daddr, *saddr;
 
@@ -301,34 +297,63 @@ static inline int manually_copy(struct task_struct *dst, struct task_struct *src
 	if (!vma || vma->vm_start > dst_addr) {
 		unsigned long ret = do_mmap_pgoff_tsk(dst, NULL, dst_aligned, PAGE_SIZE,
 				prot, DET_MAP_FLAGS, 0);
-		if (aligned != ret)
+		if (dst_aligned != ret)
 			return -ENOMEM; /* ??? */
 	}
 
-	/* Ok, now map the two pages in kernel space and copy. */
-	ret = -ENOMEM;
+	spage = pin_one_page_atomic_(smm, aligned, 0);
+	if (!spage)
+		return -ENOMEM; /* ??? */
+	dpage = pin_one_page_atomic_(dmm, dst_aligned, 1);
+	if (!dpage)
+		goto put;
+
+	/* TODO are we guaranteed the pages won't be swapped out from
+	 * under us? I'm guessing so since we have a _count>0 on the
+	 * page, but who knows for *sure*... */
+
+	/* Now that we have the pages, become atomic and map the pages.
+	 * Atomic mappings always succeed. */
 	preempt_disable();
-	saddr = pin_one_page_atomic(smm, aligned, 0, &spage);
-	if (!saddr)
-		goto ret;
-	daddr = pin_one_page_atomic(dmm, dst_aligned, 1, &dpage);
-	if (!daddr)
-		goto unmap;
+	saddr = kmap_atomic(spage);
+	daddr = kmap_atomic(dpage);
 	off = addr - aligned;
 	memcpy(daddr + off, saddr + off, len);
+	kunmap_atomic(daddr);
+	kunmap_atomic(saddr);
+	preempt_enable();
 
-	/* TODO */
+	/* TODO how do we do this correctly? */
 	set_page_dirty_lock(dpage);
 	put_page(dpage);
-	kunmap_atomic(daddr);
 	ret = 0;
 
-unmap:
+put:
 	put_page(spage);
-	kunmap_atomic(saddr);
-ret:
-	preempt_enable();
 	return ret;
+}
+
+#define printK no_printk
+
+void print_vmas(struct mm_struct *mm)
+{
+	struct vm_area_struct *vma;
+	for (vma = mm->mmap; vma; vma = vma->vm_next) {
+		printK ("%lx %lx %lx\n", vma->vm_start, vma->vm_end, vma->vm_flags);
+	}
+}
+
+int dup_one_vma(struct mm_struct *mm, struct mm_struct *oldmm,
+		struct vm_area_struct *mpnt, struct vm_area_struct **prev,
+		struct vm_area_struct ***pprev, struct rb_node ***rb_link,
+		struct rb_node **rb_parent);
+
+static inline int _split_vma(struct mm_struct *mm, struct vm_area_struct *vma,
+		unsigned long addr, int new_below)
+{
+	if (vma->vm_end != addr)
+		return split_vma(mm, vma, addr, new_below);
+	return 0;
 }
 
 /* Supports arbitrary start and end addresses.
@@ -361,27 +386,111 @@ static int do_vm_copy(struct task_struct *dst, struct task_struct *src,
 	int ret = -ENOMEM;
 	struct mm_struct *dmm = dst->mm;
 	struct mm_struct *smm = src->mm;
-	unsigned long start_page, end_page, dst_start_page, dst_end_page;
+	unsigned long start_page, end_page, lowest, highest, dst_start_page, dst_end_page;
 	unsigned long end = addr + len;
 	unsigned long dst_end = dst_addr + len;
-	struct vm_area_struct *vma;
+	struct vm_area_struct *vma, *prev;
 
 	if ((dst_addr - addr) & ~PAGE_MASK)
 		return -EINVAL;
 
+	/* Investigate likelyhood of deadlock TODO. Doubt it, since we have know one of
+	 * dmm or smm is stopped. */
 	down_write(&dmm->mmap_sem);
-	down_read(&smm->mmap_sem);
+	down_write_nested(&smm->mmap_sem, SINGLE_DEPTH_NESTING);
 
 	start_page = PAGE_ALIGN(addr);
 	end_page = LOWER_PAGE(end);
+	printK ("First ones are %lx %lx\n", start_page, end_page);
+
+	/* Set start and end addresses to match the nearest matching vm_area_structs. */
+	vma = find_vma(smm, addr);
+	if (vma) {
+		if (vma->vm_start > start_page) {
+			unsigned long a1=start_page;
+			unsigned long a2=dst_addr;
+			dst_addr += vma->vm_start - addr;
+			start_page = addr = vma->vm_start;
+			printK ("%d: start_page=%lx (%lx) dst_addr=%lx (%lx)\n", __LINE__,
+					start_page, a1, dst_addr, a2);
+		}
+	} else {
+		printK ("%d: Completely missed\n",__LINE__);
+		ret = 0;
+		goto unlock;
+	}
+	prev = NULL;
+	while (vma) {
+		if (vma->vm_start >= end) {
+			if (!prev) {
+				printK ("%d: NO prev %lx %lx\n", __LINE__, vma->vm_start, end_page);
+				ret = 0;
+				goto unlock;
+			}
+			if (prev->vm_end < end_page) {
+				unsigned long a1=end_page;
+				unsigned long a2=dst_end;
+				dst_end += prev->vm_end - end;
+				end_page = end = prev->vm_end;
+				printK ("%d: end_page=%lx (%lx) dst_end=%lx (%lx)\n", __LINE__,
+						end_page, a1, dst_end, a2);
+			}
+			break;
+		}
+		prev = vma;
+		vma = vma->vm_next;
+	}
+
+	lowest = LOWER_PAGE(addr);
+	highest = PAGE_ALIGN(end);
 	dst_start_page = PAGE_ALIGN(dst_addr);
 	dst_end_page = LOWER_PAGE(dst_end);
 
+	int didwe=0;
+	printK ("OG\n");
+	print_vmas(smm);
+	/* Do we need to split the source VMAs? */
+	vma = find_vma(smm, lowest);
+	if (vma && vma->vm_start < lowest) {
+		didwe=1;
+		printK ("%d: split_vma %lx %lx %lx\n", __LINE__, vma->vm_start, lowest, vma->vm_end);
+		if (_split_vma(smm, vma, lowest, 1))
+			goto unlock;
+	}
+	vma = find_vma(smm, addr);
+	if (vma && vma->vm_start < start_page) {
+		didwe=1;
+		printK ("%d: split_vma %lx %lx %lx\n", __LINE__, vma->vm_start, start_page, vma->vm_end);
+		if (_split_vma(smm, vma, start_page, 1))
+			goto unlock;
+	}
+	vma = find_vma(smm, end);
+	if (vma && vma->vm_start < end_page) {
+		didwe=1;
+		printK ("%d: split_vma %lx %lx %lx\n", __LINE__, vma->vm_start, end_page, vma->vm_end);
+		if (_split_vma(smm, vma, end_page, 1))
+			goto unlock;
+	}
+	vma = find_vma(smm, highest);
+	if (vma && vma->vm_start < highest) {
+		didwe=1;
+		printK ("%d: split_vma %lx %lx %lx\n", __LINE__, vma->vm_start, highest, vma->vm_end);
+		if (_split_vma(smm, vma, highest, 1))
+			goto unlock;
+	}
+	if (didwe) {
+		printK ("After\n");
+		print_vmas(smm);
+	}
+
 	/* First, unmap destination. Only unmap page aligned subregion.
 	 * Then map VMAs to match those of the source. */
-	if (unlikely(do_munmap(dmm, dst_start_page, dst_end_page - dst_start_page)))
-		goto unlock;
+	if (dst_end_page != dst_start_page) {
+		if (unlikely(do_munmap(dmm, dst_start_page, dst_end_page - dst_start_page)))
+			goto unlock;
+	}
 
+	printK ("args(%lx,%lx,%lx,%lx)\n", addr,start_page,end_page,end);
 	if (start_page > end_page) {
 		ret = manually_copy(dst, src, dmm, smm, dst_addr, addr, len);
 		goto unlock;
@@ -414,15 +523,15 @@ static int do_vm_copy(struct task_struct *dst, struct task_struct *src,
 
 	vma = find_vma(smm, addr);
 	while (vma && (vma->vm_start < end)) {
+		struct vm_area_struct *dvma, *prev;
 		unsigned long prot = vma->vm_flags & (VM_READ|VM_WRITE|VM_EXEC);
 		unsigned long local_end = end < vma->vm_end ? end : vma->vm_end;
 		unsigned long local_len = local_end - addr;
-		unsigned long rc = do_mmap_pgoff_tsk(dst, NULL, dst_addr, local_len,
-				prot, DET_MAP_FLAGS, 0);
-		if (rc != dst_addr)
+		struct rb_node **rb_link, *rb_parent;
+
+		if (dup_one_vma(dmm, smm, vma, NULL, NULL, NULL, NULL))
 			goto flush;
-		if (unlikely(copy_page_range_dst(dmm, smm, vma, dst_addr, addr, local_end)))
-			goto flush;
+
 		dst_addr += local_len;
 		addr += local_len;
 		vma = vma->vm_next;
@@ -432,7 +541,7 @@ static int do_vm_copy(struct task_struct *dst, struct task_struct *src,
 flush:
 	flush_tlb_all(); /* TODO */
 unlock:
-	up_read(&smm->mmap_sem);
+	up_write(&smm->mmap_sem);
 	up_write(&dmm->mmap_sem);
 
 	return ret;
@@ -524,7 +633,7 @@ SYSCALL_DEFINE6(dput, pid_t, child_dpid, unsigned long, flags, unsigned long, ad
 	} else {
 		child_status = wait_for_child(child);
 		if (-EINTR == child_status) {
-			/* Return now to handle the signal. */
+			/* Return now to handle the fatal signal. */
 			return -EINTR;
 		} else if (-ERESTARTNOINTR == child_status) {
 			return restart_syscall();
@@ -621,7 +730,7 @@ SYSCALL_DEFINE6(dget, pid_t, child_dpid, unsigned long, flags, unsigned long, ad
 
 	child_status = wait_for_child(child);
 	if (-EINTR == child_status) {
-		/* Return now to handle the signal. */
+		/* Return now to handle the fatal signal. */
 		return -EINTR;
 	} else if (-ERESTARTNOINTR == child_status) {
 		return restart_syscall();

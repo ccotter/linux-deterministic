@@ -362,7 +362,7 @@ void validate_mm(struct mm_struct *mm)
 #define validate_mm(mm) do { } while (0)
 #endif
 
-static struct vm_area_struct *
+struct vm_area_struct *
 find_vma_prepare(struct mm_struct *mm, unsigned long addr,
 		struct vm_area_struct **pprev, struct rb_node ***rb_link,
 		struct rb_node ** rb_parent)
@@ -464,7 +464,7 @@ static void vma_link(struct mm_struct *mm, struct vm_area_struct *vma,
  * insert vm structure into list and rbtree and anon_vma,
  * but it has already been inserted into prio_tree earlier.
  */
-static void __insert_vm_struct(struct mm_struct *mm, struct vm_area_struct *vma)
+void __insert_vm_struct(struct mm_struct *mm, struct vm_area_struct *vma)
 {
 	struct vm_area_struct *__vma, *prev;
 	struct rb_node **rb_link, *rb_parent;

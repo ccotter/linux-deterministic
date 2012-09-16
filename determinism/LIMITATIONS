@@ -6,6 +6,11 @@ Overall limitations
   deterministic Linux or b) if my lack of explicit support for namespaces will
   lead to bugs, etc if namespaces are indeed used by a process.
 
+  All code has been written for x86_64. Most of the code is generic and could be
+  run by any target, but any architecture specific pieces (syscall numbers, new
+  config options) have only been added for x86_64. Moreover, the code has only
+  been tested on x86_64 machines (obviously).
+
 Memory subsystem
 
   In general, memory operations only support anonymous, "normal" page table

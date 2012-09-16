@@ -1960,6 +1960,8 @@ int __get_user_pages(struct task_struct *tsk, struct mm_struct *mm,
 	int i;
 	unsigned long vm_flags;
 
+	pedantic_might_sleep();
+
 	if (nr_pages <= 0)
 		return 0;
 

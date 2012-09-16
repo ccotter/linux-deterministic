@@ -135,6 +135,11 @@ extern int _cond_resched(void);
  */
 # define might_sleep() \
 	do { __might_sleep(__FILE__, __LINE__, 0); might_resched(); } while (0)
+#if CONFIG_DEBUG_PEDANTIC_SPINLOCK_SLEEP
+#define pedantic_might_sleep() do { might_sleep(); } while (0)
+#else
+#define pedantic_might_sleep() do { ; } while (0)
+#endif
 #else
   static inline void __might_sleep(const char *file, int line,
 				   int preempt_offset) { }
@@ -142,6 +147,7 @@ extern int _cond_resched(void);
 #endif
 
 #define might_sleep_if(cond) do { if (cond) might_sleep(); } while (0)
+#define pedantic_might_sleep_if(cond) do { if (cond) pedantic_might_sleep(); } while (0)
 
 /*
  * abs() handles unsigned and signed longs, ints, shorts and chars.  For all

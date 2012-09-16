@@ -655,6 +655,13 @@ config DEBUG_SPINLOCK_SLEEP
 	  If you say Y here, various routines which may sleep will become very
 	  noisy if they are called with a spinlock held.
 
+config DEBUG_PEDANTIC_SPINLOCK_SLEEP
+	bool "Pedantic spinlock debugging: sleep-inside-spinlock checking"
+	depends on DEBUG_KERNEL
+	help
+	  Like DEBUG_SPINLOCK_SLEEP, but in some places that will be called *very*
+	  often.
+
 config DEBUG_LOCKING_API_SELFTESTS
 	bool "Locking API boot-time self-tests"
 	depends on DEBUG_KERNEL
