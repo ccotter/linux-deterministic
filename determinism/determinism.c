@@ -344,9 +344,9 @@ void print_vmas(struct mm_struct *mm)
 }
 
 int dup_one_vma(struct mm_struct *mm, struct mm_struct *oldmm,
-		struct vm_area_struct *mpnt, struct vm_area_struct **prev,
-		struct vm_area_struct ***pprev, struct rb_node ***rb_link,
-		struct rb_node **rb_parent);
+		struct vm_area_struct *mpnt, unsigned long dst_off,
+		struct vm_area_struct **prev, struct vm_area_struct ***pprev,
+		struct rb_node ***rb_link, struct rb_node **rb_parent);
 
 static inline int _split_vma(struct mm_struct *mm, struct vm_area_struct *vma,
 		unsigned long addr, int new_below)
@@ -390,6 +390,7 @@ static int do_vm_copy(struct task_struct *dst, struct task_struct *src,
 	unsigned long end = addr + len;
 	unsigned long dst_end = dst_addr + len;
 	struct vm_area_struct *vma, *prev;
+	unsigned long dst_off = dst_addr - addr;
 
 	if ((dst_addr - addr) & ~PAGE_MASK)
 		return -EINVAL;
@@ -529,7 +530,7 @@ static int do_vm_copy(struct task_struct *dst, struct task_struct *src,
 		unsigned long local_len = local_end - addr;
 		struct rb_node **rb_link, *rb_parent;
 
-		if (dup_one_vma(dmm, smm, vma, NULL, NULL, NULL, NULL))
+		if (dup_one_vma(dmm, smm, vma, dst_off, NULL, NULL, NULL, NULL))
 			goto flush;
 
 		dst_addr += local_len;

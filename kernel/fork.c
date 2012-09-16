@@ -311,7 +311,8 @@ out:
 void __insert_vm_struct(struct mm_struct *mm, struct vm_area_struct *vma);
 
 int dup_one_vma(struct mm_struct *mm, struct mm_struct *oldmm,
-		struct vm_area_struct *mpnt, struct vm_area_struct **prev,
+		struct vm_area_struct *mpnt, unsigned long dst_off,
+		struct vm_area_struct **prev,
 		struct vm_area_struct ***pprev, struct rb_node ***rb_link,
 		struct rb_node **rb_parent)
 {
@@ -339,6 +340,8 @@ int dup_one_vma(struct mm_struct *mm, struct mm_struct *oldmm,
 	if (!tmp)
 		return -1;
 	*tmp = *mpnt;
+	tmp->vm_start += dst_off;
+	tmp->vm_end += dst_off;
 	INIT_LIST_HEAD(&tmp->anon_vma_chain);
 	pol = mpol_dup(vma_policy(mpnt));
 	retval = PTR_ERR(pol);
@@ -393,7 +396,12 @@ int dup_one_vma(struct mm_struct *mm, struct mm_struct *oldmm,
 		__insert_vm_struct(mm, tmp);
 	}
 
-	retval = copy_page_range(mm, oldmm, mpnt);
+	if (dst_off) {
+		retval = copy_page_range_dst(mm, oldmm, mpnt, tmp->vm_start,
+				mpnt->vm_start, mpnt->vm_end);
+	} else {
+		retval = copy_page_range(mm, oldmm, mpnt);
+	}
 
 	if (tmp->vm_ops && tmp->vm_ops->open)
 		tmp->vm_ops->open(tmp);
@@ -443,8 +451,8 @@ static int dup_mmap(struct mm_struct *mm, struct mm_struct *oldmm)
 
 	prev = NULL;
 	for (mpnt = oldmm->mmap; mpnt; mpnt = mpnt->vm_next) {
-		if ((retval = dup_one_vma(mm, oldmm, mpnt, &prev, &pprev,
-						&rb_link, &rb_parent)))
+		if ((retval = dup_one_vma(mm, oldmm, mpnt, 0,
+						&prev, &pprev, &rb_link, &rb_parent)))
 			goto out;
 	}
 	/* a new mm has just been created */
