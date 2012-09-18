@@ -58,6 +58,8 @@
 #include <linux/elf.h>
 #include <linux/gfp.h>
 
+#include <linux/determinism.h>
+
 #include <asm/io.h>
 #include <asm/pgalloc.h>
 #include <asm/uaccess.h>
@@ -858,12 +860,26 @@ struct pgdir_data_t
 	pmd_t *pmd;
 	unsigned long addr, end;
 	unsigned long next_pud, next_pmd, next_pte;
+	unsigned long min, max;
 };
 
-static inline int update_dst_addrs(struct mm_struct *mm, struct pgdir_data_t *dst)
+static inline int
+update_dst_addrs(struct mm_struct *mm, struct pgdir_data_t *dst, int locks_held)
 {
 	unsigned long daddr = dst->addr;
+
+	if (daddr == dst->end)
+		return 0;
+
+	/* Solved bug: if dst->addr == dst->next_pud, then the old code would execute
+	 * the following if-block. It would incremenent dst->pgd, then allocate a new PUD.
+	 * This allocation was useless, and in fact forgotten about during mmput(), since
+	 * the VMA did not cover that region.
+	 */
+	BUG_ON(dst->min > daddr || dst->max <= daddr);
 	if (dst->next_pud == daddr) {
+		if (locks_held)
+			return -EAGAIN;
 		dst->next_pud = pgd_addr_end(daddr, dst->end);
 		dst->next_pmd = pud_addr_end(daddr, dst->next_pud);
 		dst->next_pte = pmd_addr_end(daddr, dst->next_pmd);
@@ -877,6 +893,8 @@ static inline int update_dst_addrs(struct mm_struct *mm, struct pgdir_data_t *ds
 		return 1;
 	}
 	if (dst->next_pmd == daddr) {
+		if (locks_held)
+			return -EAGAIN;
 		dst->next_pmd = pud_addr_end(daddr, dst->next_pud);
 		dst->next_pte = pmd_addr_end(daddr, dst->next_pmd);
 		++dst->pud;
@@ -894,7 +912,7 @@ static inline int update_dst_addrs(struct mm_struct *mm, struct pgdir_data_t *ds
 }
 
 static inline unsigned long
-copy_one_pte_dst(struct mm_struct *dst_mm, struct mm_struct *src_mm,
+copy_one_pte_off(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 		pte_t *dst_pte, pte_t *src_pte, struct vm_area_struct *vma,
 		unsigned long dst_addr, unsigned long addr, int *rss)
 {
@@ -966,7 +984,7 @@ out_set_pte:
 	return 0;
 }
 
-int copy_pte_range_dst(struct mm_struct *dst_mm, struct mm_struct *src_mm,
+int copy_pte_range_off(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 		pmd_t *src_pmd, struct vm_area_struct *vma,
 		unsigned long addr, unsigned long end, struct pgdir_data_t *dst)
 {
@@ -1005,20 +1023,29 @@ again:
 			    spin_needbreak(src_ptl) || spin_needbreak(dst_ptl))
 				break;
 		}
-		rc = update_dst_addrs(dst_mm, dst);
-		if (unlikely(rc < 0)) {
-			ret = -ENOMEM;
-			break;
-		} else if (rc) {
+		rc = update_dst_addrs(dst_mm, dst, 1);
+		if (!rc) {
+			/* Didn't have to allocate page table. */
+			goto cont;
+		} else if (-EAGAIN == rc) {
+			/* Need to allocate page table, so release locks, then allocate. */
 			++progress;
 			do_reschedule = 0;
 			break;
+		} else if (unlikely(rc < 0)) {
+			ret = -ENOMEM;
+		} else if (rc) {
+			++progress;
+			do_reschedule = 0;
 		}
+		break;
+
+cont:
 		if (pte_none(*src_pte)) {
 			progress++;
 			continue;
 		}
-		entry.val = copy_one_pte_dst(dst_mm, src_mm, dst_pte, src_pte,
+		entry.val = copy_one_pte_off(dst_mm, src_mm, dst_pte, src_pte,
 							vma, dst->addr, addr, rss);
 		if (entry.val)
 			break;
@@ -1035,6 +1062,9 @@ again:
 	if (ret)
 		return ret;
 
+	if (update_dst_addrs(dst_mm, dst, 0) < 0)
+		return -ENOMEM;
+
 	if (do_reschedule)
 		cond_resched();
 
@@ -1045,10 +1075,10 @@ again:
 	}
 	if (addr != end)
 		goto again;
-	return (update_dst_addrs(dst_mm, dst) < 0) ? -ENOMEM : 0;
+	return (update_dst_addrs(dst_mm, dst, 0) < 0) ? -ENOMEM : 0;
 }
 
-static inline int copy_pmd_range_dst(struct mm_struct *dst_mm, struct mm_struct *src_mm,
+static inline int copy_pmd_range_off(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 		pud_t *src_pud, struct vm_area_struct *vma, unsigned long addr,
 		unsigned long end, struct pgdir_data_t *dst)
 {
@@ -1062,18 +1092,18 @@ static inline int copy_pmd_range_dst(struct mm_struct *dst_mm, struct mm_struct 
 		split_huge_page_pmd(src_mm, src_pmd);
 		if (pmd_none_or_clear_bad(src_pmd)) {
 			dst->addr += next - addr;
-			if (unlikely(update_dst_addrs(dst_mm, dst) < 0))
+			if (unlikely(update_dst_addrs(dst_mm, dst, 0) < 0))
 				return -ENOMEM;
 			continue;
 		}
-		if (copy_pte_range_dst(dst_mm, src_mm, src_pmd, vma,
+		if (copy_pte_range_off(dst_mm, src_mm, src_pmd, vma,
 					addr, next, dst))
 			return -ENOMEM;
 	} while (src_pmd++, addr = next, addr != end);
-	return (update_dst_addrs(dst_mm, dst) < 0) ? -ENOMEM : 0;
+	return 0;
 }
 
-static inline int copy_pud_range_dst(struct mm_struct *dst_mm, struct mm_struct *src_mm,
+static inline int copy_pud_range_off(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 		pgd_t *src_pgd, struct vm_area_struct *vma, unsigned long addr,
 		unsigned long end, struct pgdir_data_t *dst)
 {
@@ -1085,21 +1115,21 @@ static inline int copy_pud_range_dst(struct mm_struct *dst_mm, struct mm_struct 
 		next = pud_addr_end(addr, end);
 		if (pud_none_or_clear_bad(src_pud)) {
 			dst->addr += next - addr;
-			if (unlikely(update_dst_addrs(dst_mm, dst) < 0))
+			if (unlikely(update_dst_addrs(dst_mm, dst, 0) < 0))
 				return -ENOMEM;
 			continue;
 		}
-		if (copy_pmd_range_dst(dst_mm, src_mm, src_pud, vma,
+		if (copy_pmd_range_off(dst_mm, src_mm, src_pud, vma,
 					addr, next, dst))
 			return -ENOMEM;
 	} while (src_pud++, addr = next, addr != end);
-	return (update_dst_addrs(dst_mm, dst) < 0) ? -ENOMEM : 0;
+	return 0;
 }
 
 /* The destination is assumed to not have any page tables populated. */
-int copy_page_range_dst(struct mm_struct *dst_mm, struct mm_struct *src_mm,
-		struct vm_area_struct *vma, unsigned long dst_addr, unsigned long addr,
-		unsigned long end)
+int copy_page_range_off(struct mm_struct *dst_mm, struct mm_struct *src_mm,
+		struct vm_area_struct *vma, unsigned long addr, unsigned long end,
+		unsigned long offset)
 {
 	pgd_t *src_pgd;
 	unsigned long next;
@@ -1129,18 +1159,23 @@ int copy_page_range_dst(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 	if (is_cow_mapping(vma->vm_flags))
 		mmu_notifier_invalidate_range_start(src_mm, addr, end);
 
-	dst.addr = dst_addr;
+	ret = -ENOMEM;
+	dst.min = vma->vm_start + offset;
+	dst.max = vma->vm_end + offset;
+	dst.addr = addr + offset;
+	dst.end = end + offset;
 	dst.pgd = pgd_offset(dst_mm, dst.addr);
-	dst.pud = pud_alloc(dst_mm, dst.pgd, dst.addr);
-	if (!dst.pud)
-		return -ENOMEM;
-	dst.pmd = pmd_alloc(dst_mm, dst.pud, dst.addr);
-	if (!dst.pmd)
-		return -ENOMEM;
-	dst.end = dst.addr + (end - addr);
+
+	BUG_ON(dst.min > dst.addr || dst.max <= dst.addr);
 	dst.next_pud = pgd_addr_end(dst.addr, dst.end);
 	dst.next_pmd = pud_addr_end(dst.addr, dst.next_pud);
 	dst.next_pte = pmd_addr_end(dst.addr, dst.next_pmd);
+	dst.pud = pud_alloc(dst_mm, dst.pgd, dst.addr);
+	if (!dst.pud)
+		goto notify;
+	dst.pmd = pmd_alloc(dst_mm, dst.pud, dst.addr);
+	if (!dst.pmd)
+		goto notify;
 
 	ret = 0;
 	src_pgd = pgd_offset(src_mm, addr);
@@ -1148,21 +1183,23 @@ int copy_page_range_dst(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 		next = pgd_addr_end(addr, end);
 		if (pgd_none_or_clear_bad(src_pgd)) {
 			dst.addr += next - addr;
-			if (unlikely(update_dst_addrs(dst_mm, &dst) < 0)) {
+			if (unlikely(update_dst_addrs(dst_mm, &dst, 0) < 0)) {
 				ret = -ENOMEM;
 				break;
 			}
 			continue;
 		}
-		if (unlikely(copy_pud_range_dst(dst_mm, src_mm, src_pgd, vma,
+		if (unlikely(copy_pud_range_off(dst_mm, src_mm, src_pgd, vma,
 						addr, next, &dst))) {
 			ret = -ENOMEM;
 			break;
 		}
 	} while (src_pgd++, addr = next, addr != end);
 
+notify:
 	if (is_cow_mapping(vma->vm_flags))
 		mmu_notifier_invalidate_range_end(src_mm, vma->vm_start, end);
+
 	return ret;
 }
 

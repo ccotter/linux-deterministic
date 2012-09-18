@@ -343,11 +343,6 @@ void print_vmas(struct mm_struct *mm)
 	}
 }
 
-int dup_one_vma(struct mm_struct *mm, struct mm_struct *oldmm,
-		struct vm_area_struct *mpnt, unsigned long dst_off,
-		struct vm_area_struct **prev, struct vm_area_struct ***pprev,
-		struct rb_node ***rb_link, struct rb_node **rb_parent);
-
 static inline int _split_vma(struct mm_struct *mm, struct vm_area_struct *vma,
 		unsigned long addr, int new_below)
 {
@@ -395,7 +390,7 @@ static int do_vm_copy(struct task_struct *dst, struct task_struct *src,
 	if ((dst_addr - addr) & ~PAGE_MASK)
 		return -EINVAL;
 
-	/* Investigate likelyhood of deadlock TODO. Doubt it, since we have know one of
+	/* Investigate likelyhood of deadlock TODO. Doubt it, since we have one of
 	 * dmm or smm is stopped. */
 	down_write(&dmm->mmap_sem);
 	down_write_nested(&smm->mmap_sem, SINGLE_DEPTH_NESTING);
@@ -524,17 +519,16 @@ static int do_vm_copy(struct task_struct *dst, struct task_struct *src,
 
 	vma = find_vma(smm, addr);
 	while (vma && (vma->vm_start < end)) {
-		struct vm_area_struct *dvma, *prev;
-		unsigned long prot = vma->vm_flags & (VM_READ|VM_WRITE|VM_EXEC);
-		unsigned long local_end = end < vma->vm_end ? end : vma->vm_end;
-		unsigned long local_len = local_end - addr;
-		struct rb_node **rb_link, *rb_parent;
+		unsigned long len = (vma->vm_end - vma->vm_start) >> PAGE_SHIFT;
 
+		if (!may_expand_vm(dst, dmm, len))
+			goto flush;
+
+		/* dup_one_vma does VM accounting. */
 		if (dup_one_vma(dmm, smm, vma, dst_off, NULL, NULL, NULL, NULL))
 			goto flush;
 
-		dst_addr += local_len;
-		addr += local_len;
+		dmm->total_vm += len;
 		vma = vma->vm_next;
 	}
 	ret = 0;
@@ -576,7 +570,7 @@ unlock:
  *
  */
 SYSCALL_DEFINE6(dput, pid_t, child_dpid, unsigned long, flags, unsigned long, addr,
-		size_t, size, unsigned long, dst, struct pt_regs *, regs)
+		size_t, size, unsigned long, child_addr, struct pt_regs *, regs)
 {
 	long ret;
 	struct task_struct *child;
@@ -594,10 +588,8 @@ SYSCALL_DEFINE6(dput, pid_t, child_dpid, unsigned long, flags, unsigned long, ad
 	if (DET_BECOME_MASTER == operation) {
 		if (is_deterministic_or_master(current))
 			return -EPERM;
-		/* TODO Check for invalid process attributes. Ex: hugetlb mappings. */
-		if (!can_become_master(current)) {
+		if (!can_become_master(current))
 			return -EPERM;
-		}
 		current->d_flags = DET_MASTER;
 		return 0;
 	}
@@ -677,7 +669,7 @@ SYSCALL_DEFINE6(dput, pid_t, child_dpid, unsigned long, flags, unsigned long, ad
 				return ret;
 			break;
 		case DET_VM_COPY:
-			ret = do_vm_copy(child, current, dst, addr, size);
+			ret = do_vm_copy(child, current, child_addr, addr, size);
 			if (ret)
 				return ret;
 			break;
@@ -698,7 +690,7 @@ SYSCALL_DEFINE6(dput, pid_t, child_dpid, unsigned long, flags, unsigned long, ad
 }
 
 SYSCALL_DEFINE6(dget, pid_t, child_dpid, unsigned long, flags, unsigned long, addr,
-		size_t, size, unsigned long, dst, struct pt_regs *, regs)
+		size_t, size, unsigned long, child_addr, struct pt_regs *, regs)
 {
 	long ret;
 	struct task_struct *child;
@@ -751,6 +743,11 @@ SYSCALL_DEFINE6(dget, pid_t, child_dpid, unsigned long, flags, unsigned long, ad
 				return ret;
 			break;
 		case DET_GET_STATUS:
+			break;
+		case DET_VM_COPY:
+			ret = do_vm_copy(current, child, addr, child_addr, size);
+			if (ret)
+				return ret;
 			break;
 	}
 

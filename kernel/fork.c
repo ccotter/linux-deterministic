@@ -308,8 +308,6 @@ out:
 	return NULL;
 }
 
-void __insert_vm_struct(struct mm_struct *mm, struct vm_area_struct *vma);
-
 int dup_one_vma(struct mm_struct *mm, struct mm_struct *oldmm,
 		struct vm_area_struct *mpnt, unsigned long dst_off,
 		struct vm_area_struct **prev,
@@ -318,7 +316,7 @@ int dup_one_vma(struct mm_struct *mm, struct mm_struct *oldmm,
 {
 	struct file *file;
 	struct vm_area_struct *tmp;
-	unsigned long charge;
+	unsigned long charge = 0;
 	struct mempolicy *pol;
 	int retval;
 
@@ -329,7 +327,6 @@ int dup_one_vma(struct mm_struct *mm, struct mm_struct *oldmm,
 				-pages);
 		return 0;
 	}
-	charge = 0;
 	if (mpnt->vm_flags & VM_ACCOUNT) {
 		unsigned int len = (mpnt->vm_end - mpnt->vm_start) >> PAGE_SHIFT;
 		if (security_vm_enough_memory(len))
@@ -338,7 +335,7 @@ int dup_one_vma(struct mm_struct *mm, struct mm_struct *oldmm,
 	}
 	tmp = kmem_cache_alloc(vm_area_cachep, GFP_KERNEL);
 	if (!tmp)
-		return -1;
+		goto fail_nomem;
 	*tmp = *mpnt;
 	tmp->vm_start += dst_off;
 	tmp->vm_end += dst_off;
@@ -393,12 +390,14 @@ int dup_one_vma(struct mm_struct *mm, struct mm_struct *oldmm,
 		*rb_parent = &tmp->vm_rb;
 		mm->map_count++;
 	} else {
+		/* __insert_vm_struct updates map_count for us, but doesn't touch any
+		 * other mem usage counter. */
 		__insert_vm_struct(mm, tmp);
 	}
 
 	if (dst_off) {
-		retval = copy_page_range_dst(mm, oldmm, mpnt, tmp->vm_start,
-				mpnt->vm_start, mpnt->vm_end);
+		retval = copy_page_range_off(mm, oldmm, mpnt,
+				mpnt->vm_start, mpnt->vm_end, dst_off);
 	} else {
 		retval = copy_page_range(mm, oldmm, mpnt);
 	}
@@ -460,7 +459,6 @@ static int dup_mmap(struct mm_struct *mm, struct mm_struct *oldmm)
 	retval = 0;
 
 out:
-	/* TODO do this */
 	up_write(&mm->mmap_sem);
 	flush_tlb_mm(oldmm);
 	up_write(&oldmm->mmap_sem);

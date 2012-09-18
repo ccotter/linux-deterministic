@@ -926,13 +926,18 @@ struct mm_walk {
 	void *private;
 };
 
+int dup_one_vma(struct mm_struct *mm, struct mm_struct *oldmm,
+		struct vm_area_struct *mpnt, unsigned long dst_off,
+		struct vm_area_struct **prev, struct vm_area_struct ***pprev,
+		struct rb_node ***rb_link, struct rb_node **rb_parent);
+
 int walk_page_range(unsigned long addr, unsigned long end,
 		struct mm_walk *walk);
 void free_pgd_range(struct mmu_gather *tlb, unsigned long addr,
 		unsigned long end, unsigned long floor, unsigned long ceiling);
-int copy_page_range_dst(struct mm_struct *dst, struct mm_struct *src,
-			struct vm_area_struct *vma, unsigned long dst_addr, unsigned long addr,
-			unsigned long end);
+int copy_page_range_off(struct mm_struct *dst, struct mm_struct *src,
+			struct vm_area_struct *vma, unsigned long addr, unsigned long end,
+			unsigned long offset);
 int copy_page_range_gen(struct mm_struct *dst, struct mm_struct *src,
 		struct vm_area_struct *vma, unsigned long addr, unsigned long end);
 int copy_page_range(struct mm_struct *dst, struct mm_struct *src,
@@ -1403,6 +1408,7 @@ extern struct vm_area_struct *vma_merge(struct mm_struct *,
 extern struct anon_vma *find_mergeable_anon_vma(struct vm_area_struct *);
 extern int split_vma(struct mm_struct *,
 	struct vm_area_struct *, unsigned long addr, int new_below);
+extern void __insert_vm_struct(struct mm_struct *, struct vm_area_struct *);
 extern int insert_vm_struct(struct mm_struct *, struct vm_area_struct *);
 extern void __vma_link_rb(struct mm_struct *, struct vm_area_struct *,
 	struct rb_node **, struct rb_node *);
