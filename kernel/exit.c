@@ -701,6 +701,8 @@ static void exit_mm(struct task_struct * tsk)
 	task_unlock(tsk);
 	mm_update_next_owner(mm);
 	mmput(mm);
+	if (tsk->snapshot_mm)
+		mmput(tsk->snapshot_mm);
 }
 
 /*

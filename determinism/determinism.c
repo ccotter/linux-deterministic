@@ -21,6 +21,7 @@
 #include <asm/tlb.h>
 #include <linux/highmem.h>
 #include <linux/rmap.h>
+#include <asm/mmu_context.h>
 
 #include <asm/syscall.h>
 
@@ -524,7 +525,8 @@ static int do_vm_copy(struct task_struct *dst, struct task_struct *src,
 		if (!may_expand_vm(dst, dmm, len))
 			goto flush;
 
-		/* dup_one_vma does VM accounting. */
+		/* dup_one_vma does VM accounting and increases map_count.
+		 * TODO what about security_vm_enough_memory() */
 		if (dup_one_vma(dmm, smm, vma, dst_off, NULL, NULL, NULL, NULL))
 			goto flush;
 
@@ -540,6 +542,82 @@ unlock:
 	up_write(&dmm->mmap_sem);
 
 	return ret;
+}
+
+/* See exec_mmap. */
+static inline int drop_mm(struct task_struct *tsk, struct mm_struct *mm, struct mm_struct *refmm)
+{
+	struct mm_struct *oldmm, *active_mm, *oldref = NULL;
+
+	oldmm = tsk->mm;
+	sync_mm_rss(tsk, oldmm); /* TODO what is this? */
+	mm_release(tsk, oldmm);
+
+	if (oldmm) {
+		down_read(&oldmm->mmap_sem);
+		if (unlikely(oldmm->core_state)) {
+			up_read(&oldmm->mmap_sem);
+			mmput(mm);
+			mmput(refmm);
+			return -EINTR;
+		}
+	}
+	task_lock(tsk);
+	if (tsk->mm != tsk->active_mm) {
+		/* Why not??? */
+		task_unlock(tsk);
+		mmput(mm);
+		mmput(refmm);
+		WARN(1, "mm != active_mm pid=%d\n", tsk->pid);
+		return -EAGAIN;
+	}
+	active_mm = tsk->active_mm;
+	tsk->mm = tsk->active_mm = mm;
+	oldref = tsk->snapshot_mm;
+	tsk->snapshot_mm = refmm;
+	/* TODO oom_disable_count */
+	task_unlock(tsk);
+
+	if (oldref)
+		mmput(oldref); /* TODO will this work? */
+	arch_pick_mmap_layout(mm);
+
+	if (oldmm) {
+		up_read(&oldmm->mmap_sem);
+		BUG_ON(active_mm != oldmm);
+		mm_update_next_owner(oldmm);
+		mmput(oldmm);
+		return 0;
+	}
+	mmdrop(active_mm);
+	return 0;
+}
+
+/* See s390_enable_sie. */
+static int do_snapshot(struct task_struct *tsk)
+{
+	struct mm_struct *mm, *ref;
+
+	mm = dup_mm(tsk);
+	if (!mm)
+		return -ENOMEM;
+	ref = dup_mm(tsk);
+	if (!ref) {
+		mmput(mm);
+		return -ENOMEM;
+	}
+
+	if (atomic_read(&tsk->mm->mm_users) > 1) {
+		/* This should NOT happen, since we don't allow multi-threading. Notify
+		 * with a message and return. */
+		task_unlock(tsk);
+		mmput(ref);
+		mmput(mm);
+		WARN(1, "Cannot do SNAPSHOT! mm_users=%d>1\n", atomic_read(&tsk->mm->mm_users));
+		return -EAGAIN;
+	}
+	return drop_mm(tsk, mm, ref);
+	return 0;
 }
 
 /*
@@ -616,6 +694,7 @@ SYSCALL_DEFINE6(dput, pid_t, child_dpid, unsigned long, flags, unsigned long, ad
 			/* TODO fault. */
 			return -ENOMEM;
 		}
+		child->snapshot_mm = NULL;
 		child->d_parent = current;
 		child->d_pid = child_dpid;
 		child->d_flags = DET_DETERMINISTIC;
@@ -670,6 +749,11 @@ SYSCALL_DEFINE6(dput, pid_t, child_dpid, unsigned long, flags, unsigned long, ad
 			break;
 		case DET_VM_COPY:
 			ret = do_vm_copy(child, current, child_addr, addr, size);
+			if (ret)
+				return ret;
+			break;
+		case DET_SNAP:
+			ret = do_snapshot(child);
 			if (ret)
 				return ret;
 			break;
@@ -787,10 +871,10 @@ SYSCALL_DEFINE1(dret, struct pt_regs *, regs)
 
 void zap_det_process(struct task_struct *tsk, int exit_code)
 {
-    tsk->signal->flags = SIGNAL_GROUP_EXIT;
-    tsk->signal->group_exit_code = exit_code;
-    tsk->signal->group_stop_count = 0;
-    sigaddset(&tsk->pending.signal, SIGKILL);
-    signal_wake_up(tsk, 1);
+	tsk->signal->flags = SIGNAL_GROUP_EXIT;
+	tsk->signal->group_exit_code = exit_code;
+	tsk->signal->group_stop_count = 0;
+	sigaddset(&tsk->pending.signal, SIGKILL);
+	signal_wake_up(tsk, 1);
 }
 

@@ -1165,6 +1165,7 @@ static struct task_struct *copy_process(unsigned long clone_flags,
 	init_sigpending(&p->pending);
 
 	p->d_flags = 0;
+	p->snapshot_mm = NULL;
 	p->utime = cputime_zero;
 	p->stime = cputime_zero;
 	p->gtime = cputime_zero;

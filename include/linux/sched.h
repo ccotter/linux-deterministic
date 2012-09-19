@@ -1306,16 +1306,16 @@ struct task_struct {
 	unsigned sched_reset_on_fork:1;
 	unsigned sched_contributes_to_load:1;
 
-    /* If and only if != 0, d_flags indicates various attributes of a
-	   deterministic process. */
+	/* If and only if != 0, d_flags indicates various attributes of a
+	   deterministic process group process. */
 	unsigned long d_flags;
-    pid_t d_pid;
-    atomic_t d_status;
+	pid_t d_pid;
+	atomic_t d_status;
 	struct semaphore d_sem;
 	spinlock_t d_spinlock;
 
-    /* Deterministic snapshot/merge information. */
-    //struct mm_struct *snapshot_mm;
+	/* Deterministic snapshot/merge information. */
+	struct mm_struct *snapshot_mm;
 	struct task_struct *d_parent;
 	/* Block these signals while in a dput() or dget(). Only used by a master process. */
 	sigset_t d_blocked;

@@ -44,7 +44,8 @@ extern long deterministic_get_regs(struct task_struct *dst,
 #define DET_ALLOW_SIGNALS        5
 #define DET_VM_ZERO              6
 #define DET_VM_COPY              7
-#define DET_MAX_OPERATION        8
+#define DET_SNAP                 8
+#define DET_MAX_OPERATION        9
 
 static inline int is_valid_det_op(unsigned long op)
 {
