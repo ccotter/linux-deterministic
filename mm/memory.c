@@ -1203,9 +1203,8 @@ notify:
 	return ret;
 }
 
-
 static inline unsigned long
-copy_one_pte(struct mm_struct *dst_mm, struct mm_struct *src_mm,
+__copy_one_pte(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 		pte_t *dst_pte, pte_t *src_pte, struct vm_area_struct *vma,
 		unsigned long addr, int *rss)
 {
@@ -1275,6 +1274,14 @@ copy_one_pte(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 out_set_pte:
 	set_pte_at(dst_mm, addr, dst_pte, pte);
 	return 0;
+}
+
+unsigned long 
+copy_one_pte(struct mm_struct *dst_mm, struct mm_struct *src_mm,
+		pte_t *dst_pte, pte_t *src_pte, struct vm_area_struct *vma,
+		unsigned long addr, int *rss)
+{
+	return __copy_one_pte(dst_mm, src_mm, dst_pte, src_pte, vma, addr, rss);
 }
 
 int copy_pte_range(struct mm_struct *dst_mm, struct mm_struct *src_mm,
@@ -1460,6 +1467,201 @@ int copy_page_range(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 {
 	return copy_page_range_gen(dst_mm, src_mm, vma, vma->vm_start, vma->vm_end);
 }
+
+#define acquire_merge_locks() \
+
+#define drop_merge_locks() \
+	do { \
+		arch_leave_lazy_mmu_mode(); \
+		if (orig_ref_pte) \
+			pte_unmap_unlock(orig_ref_pte, ref_ptl); \
+		if (orig_src_pte) \
+			pte_unmap_unlock(orig_src_pte, src_ptl); \
+		add_mm_rss_vec(dmm, rss); \
+		pte_unmap_unlock(dst_pte, dst_ptl); \
+	} while (0)
+
+static inline pteval_t get_pte_value(pte_t *pte)
+{
+	/* We don't care whether or not the page has been accessed. */
+	return pte ? pte_val(pte_mkold(*pte)) : 0;
+}
+
+static inline int merge_pte_range(
+		struct task_struct *dst, struct task_struct *src,
+		struct vm_area_struct *dvma, struct vm_area_struct *svma,
+		struct mm_struct *rmm, pmd_t *dst_pmd, pmd_t *src_pmd, pmd_t *ref_pmd,
+		unsigned long addr, unsigned long end)
+{
+	pte_t *orig_src_pte, *orig_dst_pte, *orig_ref_pte;
+	pte_t *src_pte, *dst_pte, *ref_pte;
+	spinlock_t *src_ptl, *dst_ptl, *ref_ptl;
+	struct mm_struct *dmm = dvma->vm_mm;
+	struct mm_struct *smm = svma->vm_mm;
+	int progress = 0;
+	int rss[NR_MM_COUNTERS];
+	int do_reschedule;
+	swp_entry_t entry = (swp_entry_t){0};
+
+again:
+	do_reschedule = 1;
+	init_rss_vec(rss);
+
+	do {
+		src_pte = ref_pte = NULL;
+		dst_ptl = src_ptl = ref_ptl = NULL;
+		dst_pte = pte_alloc_map_lock(dmm, dst_pmd, addr, &dst_ptl); \
+		if (!dst_pte) \
+			return -ENOMEM; \
+		if (src_pmd && !pmd_none_or_clear_bad(src_pmd)) { \
+			src_pte = pte_offset_map(src_pmd, addr); \
+			src_ptl = pte_lockptr(smm, src_pmd); \
+			spin_lock_nested(src_ptl, 1); \
+		} \
+		if (ref_pmd && !pmd_none_or_clear_bad(ref_pmd)) {\
+			ref_pte = pte_offset_map(ref_pdm, addr); \
+			ref_ptl = pte_lockptr(rmm, ref_pdm); \
+			spin_lock_nested(ref_ptl, 2); \
+		} \
+		orig_dst_pte = dst_ptd; \
+		orig_src_pte = src_pte; \
+		orig_ref_pte = ref_pte; \
+		arch_enter_lazy_mmu_mode(); \
+	} while(0)
+
+	do {
+		pteval_t dpte, spte, rpte;
+
+		if (progress >= 32) {
+			progress = 0;
+			if (need_resched() || spin_needbreak(src_ptl) ||
+					spin_needbreak(dst_ptl) || spin_needbreak(ref_ptl))
+				break;
+		}
+
+		dpte = get_pte_value(dst_pte);
+		spte = get_pte_value(src_pte);
+		rpte = get_pte_value(ref_pte);
+
+		if (spte == rpte) {
+			/* Source unchanged - do nothing. */
+			++progress;
+			continue;
+		}
+
+		if (dpte == rpte) {
+			/* Only modified by source - copy directly into destination. */
+			entry.val = copy_one_pte(dmm, smm, dst_pte, src_pte, svma, addr, rss);
+			if (entry.val)
+				break;
+			progress += 8;
+		}
+
+		/* Both pages have changed - must check byte by byte. */
+		if (merge_one_page(dst_pte, src_pte, ref_pte, dvma, svma, addr)) {
+
+		}
+
+	} while (++dst_pte, src_pte ? ++src_pte : 0, ref_pte ? ++ref_pte : 0,
+			addr += PAGE_SIZE, addr != end);
+
+	drop_merge_locks();
+	if (ret)
+		return ret;
+
+	if (do_reschedule)
+		cond_resched();
+	if (entry.val) {
+		if (add_swap_count_continuation(entry, GFP_KERNEL) < 0)
+			return -ENOMEM;
+		progress = 0;
+	}
+
+	if (addr != end)
+		goto again;
+
+	return 0;
+}
+
+static inline int merge_pmd_range(
+		struct task_struct *dst, struct task_struct *src,
+		struct vm_area_struct *dvma, struct vm_area_struct *svma,
+		struct mm_struct *rmm, pud_t *dst_pud, pud_t *src_pud, pud_t *ref_pud,
+		unsigned long addr, unsigned long end)
+{
+	pmd_t *dst_pmd, src_pmd, ref_pmd;
+	unsigned long next;
+
+	dst_pmd = pmd_alloc(dmm, dst_pud, addr);
+	if (!dst_pmd)
+		return -ENOMEM;
+	src_pmd = ref_pmd = NULL;
+	if (src_pud && !pud_none_or_clear_bad(src_pud))
+		src_pmd = pmd_offset(src_pud, addr);
+	if (ref_pud && !pud_none_or_clear_bad(ref_pud))
+		ref_pmd = pmd_offset(ref_pud, addr);
+	do {
+		next = pmd_addr_end(addr, end);
+		split_huge_page_pmd(dmm, dst_pmd);
+		if (src_pmd)
+			split_huge_page_pmd(smm, src_pmd);
+		if (ref_pmd)
+			split_huge_page_pmd(rmm, ref_pmd);
+		if (merge_pte_range(dst, src, dvma, svma, rmm,
+					dst_pmd, src_pmd, ref_pmd, addr, next))
+			return -ENOMEM;
+	} while (++dst_pmd, src_pmd ? ++src_pmd : 0, ref_pmd ? ++ref_pmd : 0,
+			addr = next, addr != end);
+	return 0;
+}
+
+static inline int merge_pud_range(
+		struct task_struct *dst, struct task_struct *src,
+		struct vm_area_struct *dvma, struct vm_area_struct *svma,
+		struct mm_struct *rmm, pgd_t *dst_pgd, pgd_t *src_pgd, pgd_t *ref_pgd,
+		unsigned long addr, unsigned long end)
+{
+	pud_t *dst_pud, *src_pud, *ref_pud;
+	unsigned long next;
+
+	dst_pud = pud_alloc(dmm, dst_pgd, addr);
+	if (!dst_pud)
+		return -ENOMEM;
+	src_pud = ref_pud = NULL;
+	if (!pgd_none_or_clear_bad(src_pgd))
+		src_pud = pud_offset(src_pgd, addr);
+	if (!pgd_none_or_clear_bad(ref_pgd))
+		ref_pud = pud_offset(ref_pgd, addr);
+	do {
+		next = pud_addr_end(addr, end);
+		if (merge_pmd_range(dst, src, dvma, svma, rmm,
+					dst_pud, src_pud, ref_pud, addr, next))
+			return -ENOMEM;
+	} while (++dst_pud, ++src_pud, ++ref_pud, addr = next, addr != end);
+	return 0;
+}
+
+static inline int merge_page_range(
+		struct task_struct *dst, struct task_struct *src,
+		struct vm_area_struct *dvma, struct vm_area_struct *svma,
+		struct mm_struct *rmm, unsigned long addr, unsigned long end)
+{
+	pgd_t *dst_pgd, *src_pgd, *ref_pgd;
+	unsigned long next;
+
+	dst_pgd = pgd_offset(dmm, addr);
+	src_pgd = pgd_offset(smm, addr);
+	ref_pgd = pgd_offset(rmm, addr);
+
+	do {
+		next = pgd_addr_end(addr, end);
+		if (merge_pud_range(dst, src, dvma, svma, rmm,
+					dst_pgd, src_pgd, ref_pgd, addr, next))
+			return -ENOMEM;
+	} while (++dst_pgd, ++src_pgd, ++ref_pgd, addr = next, addr != end);
+	
+}
+
 
 static unsigned long zap_pte_range(struct mmu_gather *tlb,
 				struct vm_area_struct *vma, pmd_t *pmd,

@@ -334,22 +334,50 @@ put:
 	return ret;
 }
 
-#define printK no_printk
-
 void print_vmas(struct mm_struct *mm)
 {
 	struct vm_area_struct *vma;
 	for (vma = mm->mmap; vma; vma = vma->vm_next) {
-		printK ("%lx %lx %lx\n", vma->vm_start, vma->vm_end, vma->vm_flags);
+		printk("%lx %lx %lx\n", vma->vm_start, vma->vm_end, vma->vm_flags);
 	}
 }
 
+static inline int __need_split(struct vm_area_struct *v1, vm_area_struct *v2)
+{
+	return
+		v1->vm_start < v2->vm_start || v2->vm_start < v1->vm_end ||
+		v1->vm_start < v2->vm_end   || v2->vm_end   < v1->vm_end ||
+		v2->vm_start < v1->vm_start || v1->vm_end   < v2->vm_end;
+}
+
+/* Returns 0 if nothing was split, positive on a successful split,
+ * and negative on error. */
 static inline int _split_vma(struct mm_struct *mm, struct vm_area_struct *vma,
 		unsigned long addr, int new_below)
 {
-	if (vma->vm_end != addr)
-		return split_vma(mm, vma, addr, new_below);
+	if (vma->vm_start < addr && addr < vma->vm_end) {
+		int r = split_vma(mm, vma, addr, new_below);
+		return r ? r : 1;
 	return 0;
+}
+
+static inline int can_do_vm_copy(struct task_struct *tsk,
+		unsigned long addr, unsigned long end)
+{
+	if (!is_master(tsk))
+		return 1; /* Assumption is that purely deterministic processes will never
+					 have "illegal" maps (e.g. VM_SHARED). */
+	struct mm_struct *mm = tsk->mm;
+	struct vm_area_struct *vma;
+
+	vma = find_vma(mm, addr);
+	while (vma && vma->vm_start < end) {
+		if (vma->vm_flags & VM_SHARED)
+			return 0;
+		vma = vma->vm_next;
+	}
+	return 1;
+
 }
 
 /* Supports arbitrary start and end addresses.
@@ -394,25 +422,24 @@ static int do_vm_copy(struct task_struct *dst, struct task_struct *src,
 	/* Investigate likelyhood of deadlock TODO. Doubt it, since we have one of
 	 * dmm or smm is stopped. */
 	down_write(&dmm->mmap_sem);
-	down_write_nested(&smm->mmap_sem, SINGLE_DEPTH_NESTING);
+	down_write_nested(&smm->mmap_sem, 1);
+
+	if (!can_do_vm_copy(src, addr, end)) {
+		ret = -EPERM;
+		goto unlock;
+	}
 
 	start_page = PAGE_ALIGN(addr);
 	end_page = LOWER_PAGE(end);
-	printK ("First ones are %lx %lx\n", start_page, end_page);
 
 	/* Set start and end addresses to match the nearest matching vm_area_structs. */
 	vma = find_vma(smm, addr);
 	if (vma) {
 		if (vma->vm_start > start_page) {
-			unsigned long a1=start_page;
-			unsigned long a2=dst_addr;
 			dst_addr += vma->vm_start - addr;
 			start_page = addr = vma->vm_start;
-			printK ("%d: start_page=%lx (%lx) dst_addr=%lx (%lx)\n", __LINE__,
-					start_page, a1, dst_addr, a2);
 		}
 	} else {
-		printK ("%d: Completely missed\n",__LINE__);
 		ret = 0;
 		goto unlock;
 	}
@@ -420,7 +447,6 @@ static int do_vm_copy(struct task_struct *dst, struct task_struct *src,
 	while (vma) {
 		if (vma->vm_start >= end) {
 			if (!prev) {
-				printK ("%d: NO prev %lx %lx\n", __LINE__, vma->vm_start, end_page);
 				ret = 0;
 				goto unlock;
 			}
@@ -429,8 +455,6 @@ static int do_vm_copy(struct task_struct *dst, struct task_struct *src,
 				unsigned long a2=dst_end;
 				dst_end += prev->vm_end - end;
 				end_page = end = prev->vm_end;
-				printK ("%d: end_page=%lx (%lx) dst_end=%lx (%lx)\n", __LINE__,
-						end_page, a1, dst_end, a2);
 			}
 			break;
 		}
@@ -443,41 +467,26 @@ static int do_vm_copy(struct task_struct *dst, struct task_struct *src,
 	dst_start_page = PAGE_ALIGN(dst_addr);
 	dst_end_page = LOWER_PAGE(dst_end);
 
-	int didwe=0;
-	printK ("OG\n");
-	print_vmas(smm);
 	/* Do we need to split the source VMAs? */
 	vma = find_vma(smm, lowest);
 	if (vma && vma->vm_start < lowest) {
-		didwe=1;
-		printK ("%d: split_vma %lx %lx %lx\n", __LINE__, vma->vm_start, lowest, vma->vm_end);
-		if (_split_vma(smm, vma, lowest, 1))
+		if (_split_vma(smm, vma, lowest, 1) < 0)
 			goto unlock;
 	}
 	vma = find_vma(smm, addr);
 	if (vma && vma->vm_start < start_page) {
-		didwe=1;
-		printK ("%d: split_vma %lx %lx %lx\n", __LINE__, vma->vm_start, start_page, vma->vm_end);
-		if (_split_vma(smm, vma, start_page, 1))
+		if (_split_vma(smm, vma, start_page, 1) < 0)
 			goto unlock;
 	}
 	vma = find_vma(smm, end);
 	if (vma && vma->vm_start < end_page) {
-		didwe=1;
-		printK ("%d: split_vma %lx %lx %lx\n", __LINE__, vma->vm_start, end_page, vma->vm_end);
-		if (_split_vma(smm, vma, end_page, 1))
+		if (_split_vma(smm, vma, end_page, 1) < 0)
 			goto unlock;
 	}
 	vma = find_vma(smm, highest);
 	if (vma && vma->vm_start < highest) {
-		didwe=1;
-		printK ("%d: split_vma %lx %lx %lx\n", __LINE__, vma->vm_start, highest, vma->vm_end);
-		if (_split_vma(smm, vma, highest, 1))
+		if (_split_vma(smm, vma, highest, 1) < 0)
 			goto unlock;
-	}
-	if (didwe) {
-		printK ("After\n");
-		print_vmas(smm);
 	}
 
 	/* First, unmap destination. Only unmap page aligned subregion.
@@ -487,7 +496,6 @@ static int do_vm_copy(struct task_struct *dst, struct task_struct *src,
 			goto unlock;
 	}
 
-	printK ("args(%lx,%lx,%lx,%lx)\n", addr,start_page,end_page,end);
 	if (start_page > end_page) {
 		ret = manually_copy(dst, src, dmm, smm, dst_addr, addr, len);
 		goto unlock;
@@ -620,10 +628,146 @@ static int do_snapshot(struct task_struct *tsk)
 	return 0;
 }
 
+/* Ensure VMAs match up at boundaries. Returns 0 iff success, -ENOMEM otherwise.
+ * Enter with both mmap_sem writes held. */
+static int prepare_merge(struct mm_struct *dmm, struct mm_struct *smm,
+unsigned long addr, unsigned long end)
+{
+	struct vm_area_struct *svma, *dvma;
+
+	svma = find_vma(smm, addr);
+	dvma = find_vma(dmm, addr);
+	while (svma && dvma && svma->vm_start < end) {
+		int r, next = 1;
+		while (dvma && dvma->vm_end <= svma->vm_start)
+			dvma = dvma->vm_next;
+		if (!dvma)
+			return 0;
+		if (r = _split_vma(smm, svma, dvma->vm_start, 1)) {
+			if (likely(r > 0))
+				next = 0;
+			else
+				return r;
+		}
+		_split_vma(dmm, dvma, svma->vm_start, 1);
+		if (_split_vma(smm, svma, dvma->vm_end, 1)) {
+			if (likely(r > 0))
+				next = 0;
+			else
+				return r;
+		}
+		_split_vma(dmm, dvma, svma->vm_end, 1);
+		if (next)
+			svma = svma->vm_next;
+	}
+	return 0;
+}
+
+static int do_merge(struct task_struct *dst, struct task_struct *src,
+		unsigned long addr, unsigned long len)
+{
+	int ret = -ENOMEM;
+	struct mm_struct *dmm = dst->mm;
+	struct mm_struct *smm = src->mm;
+	struct mm_struct *rmm = src->snapshot_mm;
+	unsigned long end = addr + len;
+	unsigned long start_page, end_page;
+	struct vm_area_struct *svma, *dvma;
+
+	/* Investigate likelyhood of deadlock TODO. Doubt it, since we have one of
+	 * dmm or smm is stopped. */
+	down_write(&dmm->mmap_sem);
+	down_write_nested(&smm->mmap_sem, 1);
+	/* No need to lock rmm->mmap_sem, but we do anyway for the sake of
+	 * being consistent with other code paths who might in the future, for some
+	 * unknown reason, operate on the mm. Currently, NO other piece of code
+	 * possible works on snapshot_mm. */
+	down_write_nested(&rmm->mmap_sem, 2);
+
+	if (unlikely(prepare_merge(dmm, smm, addr, end)))
+		goto ret;
+
+	start_page = PAGE_ALIGN(addr);
+	end_page = LOWER_PAGE(end);
+
+	if (start_page > end_page) {
+		ret = manually_merge(dst, src, refmm, addr, end);
+		goto unlock;
+	}
+
+	if (addr < start_page) {
+		ret = manually_merge(dst, src, refmm, addr, start_page);
+		if (ret)
+			goto unlock;
+	}
+
+	if (end_page < end) {
+		ret = manually_merge(dst, src, refmm, end_page, end);
+		if (ret)
+			goto unlock;
+	}
+
+	/* Ready to merge by examining page tables. */
+	addr = start_page;
+	end = end_page;
+	ret = -ENOMEM;
+
+	flush_cache_mm(smm); /* TODO */
+	flush_cache_mm(dmm);
+
+	svma = find_vma(smm, addr);
+	dvma = find_vma(dmm, addr);
+	while (svma && (svma->vm_start < end)) {
+
+		WARN_ON(__need_split(dvma, svma),
+				"do_merge(): Overlapping VMAs [%lx %lx] [%lx %lx]",
+				dvma->vm_start, dvma->vm_end, svma->vm_start, svma->vm_end);
+
+		if (dvma->vm_start != svma->vm_start) {
+			if (!may_expand_vm(dst, dmm, len))
+				goto flush;
+
+			/* dup_one_vma does VM accounting and increases map_count.
+			 * TODO what about security_vm_enough_memory() */
+			if (unlikely(dup_one_vma(dmm, smm, svma, 0, NULL, NULL, NULL, NULL)))
+				goto flush;
+
+			dmm->total_vm += len;
+			dvma = dvma->vm_next;
+			continue;
+		}
+
+		if (svma->vm_start != dvma->vm_start || svma->vm_end != dvma->vm_end) {
+			printk("  %d: VMAs not aligned! [%lx, %lx] [%lx, %lx]\n", __LINE__,
+					dvma->vm_start, dvma->vm_end, svma->vm_start, svma->vm_end);
+			return -EINVAL;
+		}
+
+		/* TODO I don't think I need to anon_vma_prepare(dvma), but my old code had
+		 * this. AFAIK, merge_page_range will, at most, copy PTEs into the
+		 * destination, but won't allocate new pages. Only the allocation of new
+		 * pages needs dvma's anon_vma structures. */
+
+		/* Ok, we have aligned VMAs, so walk the page tables. */
+		if (unlikely(merge_page_range(dst, src, dvma, svma, rmm,
+						svma->vm_start, svma->vm_end)))
+			goto flush;
+		svma = svma->vm_next;
+	}
+
+flush:
+	flush_tlb_all(); /* TODO */
+ret:
+	up_write(&rmm->mmap_sem);
+	up_write(&smm->mmap_sem);
+	up_write(&dmm->mmap_sem);
+	return ret;
+}
+
 /*
  *
  * We need the 6th argument to be pt_regs so that we can properly perform
- * do_dfork. Typical syscalls (eg. exit) don't save an entire stack frame.
+ * do_dfork. Typical syscalls (eg. write) don't save an entire stack frame.
  *
  * Returns:
  *   When current is non-deterministic:
@@ -757,6 +901,8 @@ SYSCALL_DEFINE6(dput, pid_t, child_dpid, unsigned long, flags, unsigned long, ad
 			if (ret)
 				return ret;
 			break;
+		default:
+			return -EINVAL;
 	}
 
 	BUG_ON(ret < 0 || (ret & 0xff));
@@ -833,6 +979,10 @@ SYSCALL_DEFINE6(dget, pid_t, child_dpid, unsigned long, flags, unsigned long, ad
 			if (ret)
 				return ret;
 			break;
+		case DET_MERGE:
+			ret = do_merge(current, child, addr, size);
+		default:
+			return -EINVAL;
 	}
 
 	BUG_ON(ret < 0 || (ret & 0xff));

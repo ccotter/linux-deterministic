@@ -308,7 +308,7 @@ out:
 	return NULL;
 }
 
-int dup_one_vma(struct mm_struct *mm, struct mm_struct *oldmm,
+int __dup_one_vma(struct mm_struct *mm, struct mm_struct *oldmm,
 		struct vm_area_struct *mpnt, unsigned long dst_off,
 		struct vm_area_struct **prev,
 		struct vm_area_struct ***pprev, struct rb_node ***rb_link,
@@ -416,6 +416,16 @@ fail_nomem:
 	return -ENOMEM;
 }
 
+int dup_one_vma(struct mm_struct *mm, struct mm_struct *oldmm,
+		struct vm_area_struct *mpnt, unsigned long dst_off,
+		struct vm_area_struct **prev,
+		struct vm_area_struct ***pprev, struct rb_node ***rb_link,
+		struct rb_node **rb_parent)
+{
+	return __dup_one_vma(mm, oldmm, mpnt, dst_off,
+			prev, pprev, rb_link, rb_parent);
+}
+
 #ifdef CONFIG_MMU
 static int dup_mmap(struct mm_struct *mm, struct mm_struct *oldmm)
 {
@@ -450,7 +460,7 @@ static int dup_mmap(struct mm_struct *mm, struct mm_struct *oldmm)
 
 	prev = NULL;
 	for (mpnt = oldmm->mmap; mpnt; mpnt = mpnt->vm_next) {
-		if ((retval = dup_one_vma(mm, oldmm, mpnt, 0,
+		if ((retval = __dup_one_vma(mm, oldmm, mpnt, 0,
 						&prev, &pprev, &rb_link, &rb_parent)))
 			goto out;
 	}
