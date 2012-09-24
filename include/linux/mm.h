@@ -931,6 +931,11 @@ int dup_one_vma(struct mm_struct *mm, struct mm_struct *oldmm,
 		struct vm_area_struct **prev, struct vm_area_struct ***pprev,
 		struct rb_node ***rb_link, struct rb_node **rb_parent);
 
+int merge_mapped_range(unsigned char *vdst, const unsigned char *src,
+		const unsigned char *ref, size_t off, size_t size);
+int merge_page_range(struct task_struct *dst, struct task_struct *src,
+		struct vm_area_struct *dvma, struct vm_area_struct *svma,
+		struct mm_struct *rmm, unsigned long addr, unsigned long end);
 int walk_page_range(unsigned long addr, unsigned long end,
 		struct mm_walk *walk);
 void free_pgd_range(struct mmu_gather *tlb, unsigned long addr,

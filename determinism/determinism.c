@@ -157,23 +157,8 @@ static int wait_for_det_zombie(struct task_struct *tsk)
 }
 
 /* Caller must kunmap_atomic() the mapped address. */
-static inline void *pin_one_page_atomic(struct mm_struct *mm,
-		unsigned long addr, int write, struct page **apage)
-{
-	struct page *page;
-	int ret = get_user_pages(NULL, mm, addr, 1 /* npages=1 */, write,
-			write /* force */, &page, NULL);
-	if (apage)
-		*apage = page;
-	if (ret > 0) {
-		return kmap_atomic(page);
-	} else {
-		return NULL;
-	}
-}
-
-static inline struct page *pin_one_page_atomic_(struct mm_struct *mm,
-		unsigned long addr, int write)
+static inline struct page *
+pin_one_page(struct mm_struct *mm, unsigned long addr, int write)
 {
 	struct page *page;
 	int ret = get_user_pages(NULL, mm, addr, 1 /* nrpages=1*/, write,
@@ -205,7 +190,7 @@ static inline int manually_zero(struct task_struct *tsk, unsigned long addr,
 			return 0;
 	}
 
-	page = pin_one_page_atomic_(mm, aligned, 1);
+	page = pin_one_page(mm, aligned, 1);
 	if (!page)
 		return -ENOMEM;
 
@@ -302,16 +287,12 @@ static inline int manually_copy(struct task_struct *dst, struct task_struct *src
 			return -ENOMEM; /* ??? */
 	}
 
-	spage = pin_one_page_atomic_(smm, aligned, 0);
+	spage = pin_one_page(smm, aligned, 0);
 	if (!spage)
 		return -ENOMEM; /* ??? */
-	dpage = pin_one_page_atomic_(dmm, dst_aligned, 1);
+	dpage = pin_one_page(dmm, dst_aligned, 1);
 	if (!dpage)
 		goto put;
-
-	/* TODO are we guaranteed the pages won't be swapped out from
-	 * under us? I'm guessing so since we have a _count>0 on the
-	 * page, but who knows for *sure*... */
 
 	/* Now that we have the pages, become atomic and map the pages.
 	 * Atomic mappings always succeed. */
@@ -342,12 +323,12 @@ void print_vmas(struct mm_struct *mm)
 	}
 }
 
-static inline int __need_split(struct vm_area_struct *v1, vm_area_struct *v2)
+static inline int __need_split(struct vm_area_struct *v1, struct vm_area_struct *v2)
 {
 	return
-		v1->vm_start < v2->vm_start || v2->vm_start < v1->vm_end ||
-		v1->vm_start < v2->vm_end   || v2->vm_end   < v1->vm_end ||
-		v2->vm_start < v1->vm_start || v1->vm_end   < v2->vm_end;
+		(v1->vm_start < v2->vm_start && v2->vm_start < v1->vm_end) ||
+		(v1->vm_start < v2->vm_end   && v2->vm_end   < v1->vm_end) ||
+		(v2->vm_start < v1->vm_start && v1->vm_start < v2->vm_end);
 }
 
 /* Returns 0 if nothing was split, positive on a successful split,
@@ -358,17 +339,20 @@ static inline int _split_vma(struct mm_struct *mm, struct vm_area_struct *vma,
 	if (vma->vm_start < addr && addr < vma->vm_end) {
 		int r = split_vma(mm, vma, addr, new_below);
 		return r ? r : 1;
+	}
 	return 0;
+	
 }
 
 static inline int can_do_vm_copy(struct task_struct *tsk,
 		unsigned long addr, unsigned long end)
 {
+	struct mm_struct *mm = tsk->mm;
+	struct vm_area_struct *vma;
+
 	if (!is_master(tsk))
 		return 1; /* Assumption is that purely deterministic processes will never
 					 have "illegal" maps (e.g. VM_SHARED). */
-	struct mm_struct *mm = tsk->mm;
-	struct vm_area_struct *vma;
 
 	vma = find_vma(mm, addr);
 	while (vma && vma->vm_start < end) {
@@ -451,8 +435,6 @@ static int do_vm_copy(struct task_struct *dst, struct task_struct *src,
 				goto unlock;
 			}
 			if (prev->vm_end < end_page) {
-				unsigned long a1=end_page;
-				unsigned long a2=dst_end;
 				dst_end += prev->vm_end - end;
 				end_page = end = prev->vm_end;
 			}
@@ -638,29 +620,96 @@ unsigned long addr, unsigned long end)
 	svma = find_vma(smm, addr);
 	dvma = find_vma(dmm, addr);
 	while (svma && dvma && svma->vm_start < end) {
-		int r, next = 1;
+		int rc, next = 1;
 		while (dvma && dvma->vm_end <= svma->vm_start)
 			dvma = dvma->vm_next;
 		if (!dvma)
 			return 0;
-		if (r = _split_vma(smm, svma, dvma->vm_start, 1)) {
-			if (likely(r > 0))
+		if ((rc = _split_vma(smm, svma, dvma->vm_start, 1))) {
+			if (rc > 0)
 				next = 0;
 			else
-				return r;
+				return rc;
 		}
-		_split_vma(dmm, dvma, svma->vm_start, 1);
-		if (_split_vma(smm, svma, dvma->vm_end, 1)) {
-			if (likely(r > 0))
+		if ((rc = _split_vma(dmm, dvma, svma->vm_start, 1)) < 0)
+			return rc;
+		if ((rc = _split_vma(smm, svma, dvma->vm_end, 1))) {
+			if (rc > 0)
 				next = 0;
 			else
-				return r;
+				return rc;
 		}
-		_split_vma(dmm, dvma, svma->vm_end, 1);
+		if ((rc = _split_vma(dmm, dvma, svma->vm_end, 1)) < 0)
+			return rc;
 		if (next)
 			svma = svma->vm_next;
 	}
 	return 0;
+}
+
+static int
+manually_merge(struct task_struct *dst,
+		struct mm_struct *dmm, struct mm_struct *smm,
+		struct mm_struct *rmm, unsigned long addr, unsigned long len)
+{
+	struct vm_area_struct *vma;
+	unsigned long prot, aligned;
+	struct page *dpage, *spage, *rpage;
+	unsigned char *daddr, *saddr, *raddr;
+	int ret = -ENOMEM;
+
+	aligned = LOWER_PAGE(addr);
+	/* Ensure source mapped. */
+	vma = find_vma(smm, addr);
+	if (!vma || vma->vm_start > addr)
+		return 0;
+
+	/* Do we need to map destination? */
+	prot = vma->vm_flags & (VM_READ|VM_WRITE|VM_EXEC);
+	vma = find_vma(dmm, addr);
+	if (!vma || vma->vm_start > addr) {
+		unsigned long rc = do_mmap_pgoff_tsk(dst, NULL, aligned, PAGE_SIZE,
+				prot, DET_MAP_FLAGS, 0);
+		if (aligned != rc)
+			return -ENOMEM; /* ??? */
+	}
+
+	spage = pin_one_page(smm, aligned, 0);
+	if (!spage)
+		return -ENOMEM; /* ??? */
+	dpage = pin_one_page(dmm, aligned, 1);
+	if (!dpage)
+		goto put;
+	rpage = pin_one_page(rmm, aligned, 0);
+	if (!rpage) {
+		rpage = ZERO_PAGE(0);
+		get_page(rpage);
+	}
+
+	/* Now that we have the pages, become atomic and map the pages.
+	 * Atomic mappings always succeed. */
+	preempt_disable();
+	daddr = kmap_atomic(dpage);
+	saddr = kmap_atomic(spage);
+	raddr = kmap_atomic(rpage);
+	ret = merge_mapped_range(daddr, saddr, raddr, addr - aligned, len);
+	kunmap_atomic(raddr);
+	kunmap_atomic(saddr);
+	kunmap_atomic(daddr);
+	preempt_enable();
+
+	put_page(rpage);
+
+	/* TODO how do we do this correctly? */
+	if (1 == ret) {
+		set_page_dirty_lock(dpage);
+		ret = 0;
+	}
+	put_page(dpage);
+
+put:
+	put_page(spage);
+	return ret;
 }
 
 static int do_merge(struct task_struct *dst, struct task_struct *src,
@@ -685,24 +734,24 @@ static int do_merge(struct task_struct *dst, struct task_struct *src,
 	down_write_nested(&rmm->mmap_sem, 2);
 
 	if (unlikely(prepare_merge(dmm, smm, addr, end)))
-		goto ret;
+		goto unlock;
 
 	start_page = PAGE_ALIGN(addr);
 	end_page = LOWER_PAGE(end);
 
 	if (start_page > end_page) {
-		ret = manually_merge(dst, src, refmm, addr, end);
+		ret = manually_merge(dst, dmm, smm, rmm, addr, len);
 		goto unlock;
 	}
 
 	if (addr < start_page) {
-		ret = manually_merge(dst, src, refmm, addr, start_page);
+		ret = manually_merge(dst, dmm, smm, rmm, addr, start_page - addr);
 		if (ret)
 			goto unlock;
 	}
 
 	if (end_page < end) {
-		ret = manually_merge(dst, src, refmm, end_page, end);
+		ret = manually_merge(dst, dmm, smm, rmm, end_page, end - end_page);
 		if (ret)
 			goto unlock;
 	}
@@ -718,8 +767,9 @@ static int do_merge(struct task_struct *dst, struct task_struct *src,
 	svma = find_vma(smm, addr);
 	dvma = find_vma(dmm, addr);
 	while (svma && (svma->vm_start < end)) {
+		unsigned long local_start, local_end;
 
-		WARN_ON(__need_split(dvma, svma),
+		WARN(__need_split(dvma, svma),
 				"do_merge(): Overlapping VMAs [%lx %lx] [%lx %lx]",
 				dvma->vm_start, dvma->vm_end, svma->vm_start, svma->vm_end);
 
@@ -740,7 +790,8 @@ static int do_merge(struct task_struct *dst, struct task_struct *src,
 		if (svma->vm_start != dvma->vm_start || svma->vm_end != dvma->vm_end) {
 			printk("  %d: VMAs not aligned! [%lx, %lx] [%lx, %lx]\n", __LINE__,
 					dvma->vm_start, dvma->vm_end, svma->vm_start, svma->vm_end);
-			return -EINVAL;
+			ret = -EINVAL;
+			goto unlock;
 		}
 
 		/* TODO I don't think I need to anon_vma_prepare(dvma), but my old code had
@@ -748,16 +799,18 @@ static int do_merge(struct task_struct *dst, struct task_struct *src,
 		 * destination, but won't allocate new pages. Only the allocation of new
 		 * pages needs dvma's anon_vma structures. */
 
+		local_start = svma->vm_start < addr ? addr : svma->vm_start;
+		local_end = svma->vm_end > end ? end : svma->vm_end;
 		/* Ok, we have aligned VMAs, so walk the page tables. */
-		if (unlikely(merge_page_range(dst, src, dvma, svma, rmm,
-						svma->vm_start, svma->vm_end)))
+		if (unlikely(ret = merge_page_range(dst, src, dvma, svma, rmm,
+						local_start, local_end)))
 			goto flush;
 		svma = svma->vm_next;
 	}
 
 flush:
 	flush_tlb_all(); /* TODO */
-ret:
+unlock:
 	up_write(&rmm->mmap_sem);
 	up_write(&smm->mmap_sem);
 	up_write(&dmm->mmap_sem);
@@ -981,6 +1034,9 @@ SYSCALL_DEFINE6(dget, pid_t, child_dpid, unsigned long, flags, unsigned long, ad
 			break;
 		case DET_MERGE:
 			ret = do_merge(current, child, addr, size);
+			if (ret)
+				return ret;
+			break;
 		default:
 			return -EINVAL;
 	}

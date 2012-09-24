@@ -1468,23 +1468,155 @@ int copy_page_range(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 	return copy_page_range_gen(dst_mm, src_mm, vma, vma->vm_start, vma->vm_end);
 }
 
-#define acquire_merge_locks() \
+/* Compares memory for the MERGE operation - any conflicts immediately return
+ * -EFAULT. Success returns 1 if destination was modified, 0 otherwise. */
+int merge_mapped_range(unsigned char *dst, const unsigned char *src,
+		const unsigned char *ref, size_t off, size_t size)
+{
+	size_t i, diff;
 
-#define drop_merge_locks() \
-	do { \
-		arch_leave_lazy_mmu_mode(); \
-		if (orig_ref_pte) \
-			pte_unmap_unlock(orig_ref_pte, ref_ptl); \
-		if (orig_src_pte) \
-			pte_unmap_unlock(orig_src_pte, src_ptl); \
-		add_mm_rss_vec(dmm, rss); \
-		pte_unmap_unlock(dst_pte, dst_ptl); \
-	} while (0)
+	dst += off;
+	src += off;
+	ref += off;
+
+	for (i = diff = 0; i < size; ++i) {
+		if (ref[i] == src[i])
+			continue;
+		if (ref[i] == dst[i]) {
+			dst[i] = src[i];
+			diff = 1;
+			continue;
+		}
+		return -EFAULT;
+	}
+	return diff;
+}
 
 static inline pteval_t get_pte_value(pte_t *pte)
 {
 	/* We don't care whether or not the page has been accessed. */
 	return pte ? pte_val(pte_mkold(*pte)) : 0;
+}
+
+static inline struct page *
+get_one_page(pte_t *ptep, struct vm_area_struct *vma, unsigned long addr)
+{
+	struct page *page;
+	pte_t pte;
+
+	if (!vma || !ptep) {
+		return ZERO_PAGE(0);
+	}
+	pte = *ptep;
+	if (!pte_present(pte))
+		return NULL;
+	page = vm_normal_page(vma, addr, pte);
+	if (!page) {
+		if (is_zero_pfn(pte_pfn(pte)))
+			page = pte_page(pte);
+		else
+			return ERR_PTR(-EFAULT);
+	}
+	return page;
+}
+
+/* Returns NULL on success, otherwise a pointer to the VMA that needs to
+ * fault the page into memory. The pointer might actually encode an error
+ * code, if merge_one_pte fails. */
+static inline struct vm_area_struct *
+merge_one_pte(pte_t *dpte, pte_t *spte, pte_t *rpte,
+		struct vm_area_struct *dvma, struct vm_area_struct *svma,
+		struct vm_area_struct *rvma, unsigned long addr)
+{
+	struct page *dpage, *spage, *rpage;
+	unsigned char *daddr, *saddr, *raddr;
+	int ret;
+
+	/* If the destination or source don't have a page mapped yet, then demand
+	 * paging needs to fill this in when handle_mm_fault() runs. Return
+	 * the respective VMA so the caller will call handle_mm_fault(). */
+	dpage = get_one_page(dpte, dvma, addr);
+	if (!dpage)
+		return dvma;
+	else if (IS_ERR(dpage))
+		return dvma;
+
+	spage = get_one_page(spte, svma, addr);
+	if (!spage)
+		return svma;
+	else if (IS_ERR(spage))
+		return svma;
+
+	/* If reference doesn't have a page, then map to the zero page. */
+	rpage = get_one_page(rpte, rvma, addr);
+	if (!rpage)
+		rpage = ZERO_PAGE(0);
+	else if (IS_ERR(rpage))
+		return rvma;
+
+	get_page(dpage);
+	get_page(spage);
+	get_page(rpage);
+
+	daddr = kmap_atomic(dpage);
+	saddr = kmap_atomic(spage);
+	raddr = kmap_atomic(rpage);
+
+	ret = merge_mapped_range(daddr, saddr, raddr, 0, PAGE_SIZE);
+
+	kunmap_atomic(raddr);
+	kunmap_atomic(saddr);
+	kunmap_atomic(daddr);
+
+	if (1 == ret) {
+		set_page_dirty(dpage);
+		ret = 0;
+	}
+
+	put_page(rpage);
+	put_page(spage);
+	put_page(dpage);
+	return ERR_PTR(ret);
+}
+
+static inline void
+clear_one_pte(struct mm_struct *mm, struct vm_area_struct *vma, pte_t *pte,
+		unsigned long addr, int *rss)
+{
+	pte_t ptent = *pte;
+	if (pte_none(ptent))
+		return;
+	if (pte_present(ptent)) {
+		struct page *page = vm_normal_page(vma, addr, ptent);
+		ptent = ptep_get_and_clear_full(mm, addr, pte, 0 /* full = 0 */);
+		if (unlikely(!page))
+			return;
+		if (PageAnon(page))
+			rss[MM_ANONPAGES]--;
+		else {
+			if (pte_dirty(ptent))
+				set_page_dirty(page);
+			if (pte_young(ptent) && likely(!VM_SequentialReadHint(vma)))
+				mark_page_accessed(page);
+			rss[MM_FILEPAGES]--;
+		}
+		page_remove_rmap(page);
+		if (unlikely(page_mapcount(page) < 0))
+			print_bad_pte(vma, addr, ptent, page);
+		return;
+	}
+	if (pte_file(ptent)) {
+		if (unlikely(!(vma->vm_flags & VM_NONLINEAR)))
+			print_bad_pte(vma, addr, ptent, NULL);
+	} else {
+		swp_entry_t entry = pte_to_swp_entry(ptent);
+
+		if (!non_swap_entry(entry))
+			rss[MM_SWAPENTS]--;
+		if (unlikely(!free_swap_and_cache(entry)))
+			print_bad_pte(vma, addr, ptent, NULL);
+	}
+	pte_clear_not_present_full(mm, addr, pte, 0 /* full = 0 */);
 }
 
 static inline int merge_pte_range(
@@ -1498,39 +1630,39 @@ static inline int merge_pte_range(
 	spinlock_t *src_ptl, *dst_ptl, *ref_ptl;
 	struct mm_struct *dmm = dvma->vm_mm;
 	struct mm_struct *smm = svma->vm_mm;
-	int progress = 0;
-	int rss[NR_MM_COUNTERS];
+	int progress = 0, ret = 0;
 	int do_reschedule;
+	int rss[NR_MM_COUNTERS];
 	swp_entry_t entry = (swp_entry_t){0};
+	struct vm_area_struct *to_fault = NULL;
 
 again:
 	do_reschedule = 1;
 	init_rss_vec(rss);
 
-	do {
-		src_pte = ref_pte = NULL;
-		dst_ptl = src_ptl = ref_ptl = NULL;
-		dst_pte = pte_alloc_map_lock(dmm, dst_pmd, addr, &dst_ptl); \
-		if (!dst_pte) \
-			return -ENOMEM; \
-		if (src_pmd && !pmd_none_or_clear_bad(src_pmd)) { \
-			src_pte = pte_offset_map(src_pmd, addr); \
-			src_ptl = pte_lockptr(smm, src_pmd); \
-			spin_lock_nested(src_ptl, 1); \
-		} \
-		if (ref_pmd && !pmd_none_or_clear_bad(ref_pmd)) {\
-			ref_pte = pte_offset_map(ref_pdm, addr); \
-			ref_ptl = pte_lockptr(rmm, ref_pdm); \
-			spin_lock_nested(ref_ptl, 2); \
-		} \
-		orig_dst_pte = dst_ptd; \
-		orig_src_pte = src_pte; \
-		orig_ref_pte = ref_pte; \
-		arch_enter_lazy_mmu_mode(); \
-	} while(0)
+	src_pte = ref_pte = NULL;
+	dst_ptl = src_ptl = ref_ptl = NULL;
+	dst_pte = pte_alloc_map_lock(dmm, dst_pmd, addr, &dst_ptl);
+	if (!dst_pte)
+		return -ENOMEM;
+	if (src_pmd && !pmd_none_or_clear_bad(src_pmd)) {
+		src_pte = pte_offset_map(src_pmd, addr);
+		src_ptl = pte_lockptr(smm, src_pmd);
+		spin_lock_nested(src_ptl, 1);
+	}
+	if (ref_pmd && !pmd_none_or_clear_bad(ref_pmd)) {
+		ref_pte = pte_offset_map(ref_pmd, addr);
+		ref_ptl = pte_lockptr(rmm, ref_pmd);
+		spin_lock_nested(ref_ptl, 2);
+	}
+	orig_dst_pte = dst_pte;
+	orig_src_pte = src_pte;
+	orig_ref_pte = ref_pte;
+	arch_enter_lazy_mmu_mode();
 
 	do {
 		pteval_t dpte, spte, rpte;
+		struct vm_area_struct *rvma;
 
 		if (progress >= 32) {
 			progress = 0;
@@ -1548,29 +1680,76 @@ again:
 			++progress;
 			continue;
 		}
+		progress += 8;
 
 		if (dpte == rpte) {
-			/* Only modified by source - copy directly into destination. */
+			/* Only modified by source, thus we COW into destination. */
+			clear_one_pte(dmm, dvma, dst_pte, addr, rss);
 			entry.val = copy_one_pte(dmm, smm, dst_pte, src_pte, svma, addr, rss);
 			if (entry.val)
 				break;
-			progress += 8;
+			continue;
 		}
 
 		/* Both pages have changed - must check byte by byte. */
-		if (merge_one_page(dst_pte, src_pte, ref_pte, dvma, svma, addr)) {
-
+		rvma = find_vma(rmm, addr);
+		to_fault = merge_one_pte(dst_pte, src_pte, ref_pte, dvma, svma, rvma, addr);
+		if (!to_fault)
+			continue;
+		else if (IS_ERR(to_fault)) {
+			/* Merge conflict! */
+			ret = -EFAULT;
+			break;
+		} else {
+			/* Must fault in a page, so release locks, fault in the page with
+			 * handle_mm_fault(), then then try again. */
+			break;
 		}
 
 	} while (++dst_pte, src_pte ? ++src_pte : 0, ref_pte ? ++ref_pte : 0,
 			addr += PAGE_SIZE, addr != end);
 
-	drop_merge_locks();
+	arch_leave_lazy_mmu_mode();
+	if (orig_ref_pte)
+		pte_unmap_unlock(orig_ref_pte, ref_ptl);
+	if (orig_src_pte)
+		pte_unmap_unlock(orig_src_pte, src_ptl);
+	add_mm_rss_vec(dmm, rss);
+	pte_unmap_unlock(dst_pte, dst_ptl);
+
 	if (ret)
 		return ret;
 
+	if (to_fault) {
+		int tries = 0;
+		int rc = VM_FAULT_RETRY;
+		while (rc & VM_FAULT_RETRY && tries++ < 10) {
+			struct task_struct *tsk;
+			rc = handle_mm_fault(to_fault->vm_mm, to_fault, addr, 0);
+			if (rc & VM_FAULT_ERROR) {
+				if (rc & VM_FAULT_OOM)
+					return -ENOMEM;
+				return -EFAULT;
+			}
+
+			tsk = to_fault->vm_mm == src->mm ? src : dst;
+			if (rc & VM_FAULT_MAJOR)
+				tsk->maj_flt++;
+			else
+				tsk->min_flt++;
+			cond_resched();
+			do_reschedule = 0;
+		}
+		if (rc & VM_FAULT_RETRY) {
+			printk("merge_pte_range: handle_mm_fault returned "
+				"VM_FAULT_RETRY too many times.");
+			return -EFAULT;
+		}
+	}
+
 	if (do_reschedule)
 		cond_resched();
+
 	if (entry.val) {
 		if (add_swap_count_continuation(entry, GFP_KERNEL) < 0)
 			return -ENOMEM;
@@ -1589,10 +1768,11 @@ static inline int merge_pmd_range(
 		struct mm_struct *rmm, pud_t *dst_pud, pud_t *src_pud, pud_t *ref_pud,
 		unsigned long addr, unsigned long end)
 {
-	pmd_t *dst_pmd, src_pmd, ref_pmd;
+	pmd_t *dst_pmd, *src_pmd, *ref_pmd;
 	unsigned long next;
+	int rc;
 
-	dst_pmd = pmd_alloc(dmm, dst_pud, addr);
+	dst_pmd = pmd_alloc(dvma->vm_mm, dst_pud, addr);
 	if (!dst_pmd)
 		return -ENOMEM;
 	src_pmd = ref_pmd = NULL;
@@ -1602,14 +1782,14 @@ static inline int merge_pmd_range(
 		ref_pmd = pmd_offset(ref_pud, addr);
 	do {
 		next = pmd_addr_end(addr, end);
-		split_huge_page_pmd(dmm, dst_pmd);
+		split_huge_page_pmd(dvma->vm_mm, dst_pmd);
 		if (src_pmd)
-			split_huge_page_pmd(smm, src_pmd);
+			split_huge_page_pmd(svma->vm_mm, src_pmd);
 		if (ref_pmd)
 			split_huge_page_pmd(rmm, ref_pmd);
-		if (merge_pte_range(dst, src, dvma, svma, rmm,
-					dst_pmd, src_pmd, ref_pmd, addr, next))
-			return -ENOMEM;
+		if ((rc = merge_pte_range(dst, src, dvma, svma, rmm,
+					dst_pmd, src_pmd, ref_pmd, addr, next)))
+			return rc;
 	} while (++dst_pmd, src_pmd ? ++src_pmd : 0, ref_pmd ? ++ref_pmd : 0,
 			addr = next, addr != end);
 	return 0;
@@ -1623,8 +1803,9 @@ static inline int merge_pud_range(
 {
 	pud_t *dst_pud, *src_pud, *ref_pud;
 	unsigned long next;
+	int rc;
 
-	dst_pud = pud_alloc(dmm, dst_pgd, addr);
+	dst_pud = pud_alloc(dvma->vm_mm, dst_pgd, addr);
 	if (!dst_pud)
 		return -ENOMEM;
 	src_pud = ref_pud = NULL;
@@ -1634,32 +1815,33 @@ static inline int merge_pud_range(
 		ref_pud = pud_offset(ref_pgd, addr);
 	do {
 		next = pud_addr_end(addr, end);
-		if (merge_pmd_range(dst, src, dvma, svma, rmm,
-					dst_pud, src_pud, ref_pud, addr, next))
-			return -ENOMEM;
+		if ((rc = merge_pmd_range(dst, src, dvma, svma, rmm,
+					dst_pud, src_pud, ref_pud, addr, next)))
+			return rc;
 	} while (++dst_pud, ++src_pud, ++ref_pud, addr = next, addr != end);
 	return 0;
 }
 
-static inline int merge_page_range(
-		struct task_struct *dst, struct task_struct *src,
+int
+merge_page_range(struct task_struct *dst, struct task_struct *src,
 		struct vm_area_struct *dvma, struct vm_area_struct *svma,
 		struct mm_struct *rmm, unsigned long addr, unsigned long end)
 {
 	pgd_t *dst_pgd, *src_pgd, *ref_pgd;
 	unsigned long next;
+	int rc;
 
-	dst_pgd = pgd_offset(dmm, addr);
-	src_pgd = pgd_offset(smm, addr);
+	dst_pgd = pgd_offset(dvma->vm_mm, addr);
+	src_pgd = pgd_offset(svma->vm_mm, addr);
 	ref_pgd = pgd_offset(rmm, addr);
 
 	do {
 		next = pgd_addr_end(addr, end);
-		if (merge_pud_range(dst, src, dvma, svma, rmm,
-					dst_pgd, src_pgd, ref_pgd, addr, next))
-			return -ENOMEM;
+		if ((rc = (merge_pud_range(dst, src, dvma, svma, rmm,
+					dst_pgd, src_pgd, ref_pgd, addr, next))))
+			return rc;
 	} while (++dst_pgd, ++src_pgd, ++ref_pgd, addr = next, addr != end);
-	
+	return 0;
 }
 
 
