@@ -156,7 +156,7 @@ static int wait_for_det_zombie(struct task_struct *tsk)
 	return sys_wait4(tsk->pid, NULL, 0, NULL);
 }
 
-/* Caller must kunmap_atomic() the mapped address. */
+/* Caller must put_page() the returned struct page. */
 static inline struct page *
 pin_one_page(struct mm_struct *mm, unsigned long addr, int write)
 {
@@ -198,6 +198,7 @@ static inline int manually_zero(struct task_struct *tsk, unsigned long addr,
 	vaddr = kmap_atomic(page);
 	vaddr += addr - aligned;
 	memset(vaddr, 0, len);
+	kunmap_atomic(vaddr);
 	preempt_enable();
 
 	put_page(page);
@@ -861,10 +862,13 @@ SYSCALL_DEFINE6(dput, pid_t, child_dpid, unsigned long, flags, unsigned long, ad
 		return -EINVAL;
 
 	if (DET_BECOME_MASTER == operation) {
-		if (is_deterministic_or_master(current))
+		if (is_deterministic(current))
+			return -EACCES;
+		else if (is_master(current))
+			return 0;
+		else if (!can_become_master(current))
 			return -EPERM;
-		if (!can_become_master(current))
-			return -EPERM;
+
 		current->d_flags = DET_MASTER;
 		return 0;
 	}
@@ -875,7 +879,7 @@ SYSCALL_DEFINE6(dput, pid_t, child_dpid, unsigned long, flags, unsigned long, ad
 
 	if (DET_ALLOW_SIGNALS == operation) {
 		if (!is_master(current))
-			return -EPERM;
+			return -EACCES;
 		return set_blocked_signals(current, addr, size);
 	}
 
@@ -937,8 +941,6 @@ SYSCALL_DEFINE6(dput, pid_t, child_dpid, unsigned long, flags, unsigned long, ad
 			zap_det_process(child, 0);
 			forget_det_child(child);
 			break;
-		case DET_GET_STATUS:
-			break;
 		case DET_VM_ZERO:
 			ret = do_vm_zero(child, addr, size, opflags >> 8);
 			if (ret)
@@ -954,8 +956,9 @@ SYSCALL_DEFINE6(dput, pid_t, child_dpid, unsigned long, flags, unsigned long, ad
 			if (ret)
 				return ret;
 			break;
+		case DET_GET_STATUS:
 		default:
-			return -EINVAL;
+			break;
 	}
 
 	BUG_ON(ret < 0 || (ret & 0xff));
