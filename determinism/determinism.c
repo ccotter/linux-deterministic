@@ -716,7 +716,7 @@ put:
 static int do_merge(struct task_struct *dst, struct task_struct *src,
 		unsigned long addr, unsigned long len)
 {
-	int ret = -ENOMEM;
+	int ret;
 	struct mm_struct *dmm = dst->mm;
 	struct mm_struct *smm = src->mm;
 	struct mm_struct *rmm = src->snapshot_mm;
@@ -760,7 +760,7 @@ static int do_merge(struct task_struct *dst, struct task_struct *src,
 	/* Ready to merge by examining page tables. */
 	addr = start_page;
 	end = end_page;
-	ret = -ENOMEM;
+	ret = 0;
 
 	flush_cache_mm(smm); /* TODO */
 	flush_cache_mm(dmm);
@@ -1080,6 +1080,8 @@ SYSCALL_DEFINE1(dret, struct pt_regs *, regs)
 
 void zap_det_process(struct task_struct *tsk, int exit_code)
 {
+	if (tsk->exit_state)
+		return;
 	tsk->signal->flags = SIGNAL_GROUP_EXIT;
 	tsk->signal->group_exit_code = exit_code;
 	tsk->signal->group_stop_count = 0;
