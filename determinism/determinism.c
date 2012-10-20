@@ -716,13 +716,17 @@ put:
 static int do_merge(struct task_struct *dst, struct task_struct *src,
 		unsigned long addr, unsigned long len)
 {
-	int ret;
+	int ret = -ENOMEM;
 	struct mm_struct *dmm = dst->mm;
 	struct mm_struct *smm = src->mm;
 	struct mm_struct *rmm = src->snapshot_mm;
 	unsigned long end = addr + len;
 	unsigned long start_page, end_page;
 	struct vm_area_struct *svma, *dvma;
+
+	if (!rmm) {
+		return -EPERM;
+	}
 
 	/* Investigate likelyhood of deadlock TODO. Doubt it, since we have one of
 	 * dmm or smm is stopped. */
@@ -760,7 +764,7 @@ static int do_merge(struct task_struct *dst, struct task_struct *src,
 	/* Ready to merge by examining page tables. */
 	addr = start_page;
 	end = end_page;
-	ret = 0;
+	ret = -ENOMEM;
 
 	flush_cache_mm(smm); /* TODO */
 	flush_cache_mm(dmm);
@@ -792,7 +796,7 @@ static int do_merge(struct task_struct *dst, struct task_struct *src,
 			printk("  %d: VMAs not aligned! [%lx, %lx] [%lx, %lx]\n", __LINE__,
 					dvma->vm_start, dvma->vm_end, svma->vm_start, svma->vm_end);
 			ret = -EINVAL;
-			goto unlock;
+			goto flush;
 		}
 
 		/* TODO I don't think I need to anon_vma_prepare(dvma), but my old code had
@@ -807,7 +811,9 @@ static int do_merge(struct task_struct *dst, struct task_struct *src,
 						local_start, local_end)))
 			goto flush;
 		svma = svma->vm_next;
+		dvma = dvma->vm_next;
 	}
+	ret = 0;
 
 flush:
 	flush_tlb_all(); /* TODO */
@@ -837,11 +843,11 @@ unlock:
  *     * On any failure that is deterministically reproducible (eg. invalid
  *       arguments), an appropriate negative error number is returned.
  *
- *  Flags are a little complicated (just a little). The lowest order 8 bits are
- *  reserved to indicate what operation to perform. All remaining bits (24) are
+ *  Flags are a little complicated (just a little). The lowest order 16 bits are
+ *  reserved to indicate what operations to perform. All remaining bits (16) are
  *  used to indicate various flags associated with the particular operation. The
  *  lowest 8 bits are reserved for operation specific flags, and the remaining
- *  16 bits (upper half) are used for global flags. See determinism.h for
+ *  8 bits (upper half) are used for global flags. See determinism.h for
  *  example flag macros.
  *
  */
@@ -854,8 +860,8 @@ SYSCALL_DEFINE6(dput, pid_t, child_dpid, unsigned long, flags, unsigned long, ad
 	unsigned int operation;
 	unsigned long opflags;
 
-	operation = 0xff & flags;
-	opflags = 0xff00 & flags;
+	operation = 0xffff & flags;
+	opflags = 0xff0000 & flags;
 	flags &= ~0xffffL;
 
 	if (!is_valid_det_op(operation))
@@ -927,38 +933,36 @@ SYSCALL_DEFINE6(dput, pid_t, child_dpid, unsigned long, flags, unsigned long, ad
 	}
 
 	ret = 0;
-	switch (operation) {
-		case DET_REGS:
-			ret = deterministic_put_regs(child, (const void __user*)addr, opflags >> 8);
-			if (ret)
-				return ret;
-			break;
-		case DET_KILL:
-			if (DET_START & flags)
-				return -EINVAL;
-			atomic_set(&child->d_status, DET_S_EXIT_NORMAL);
-			child_status = DET_S_EXIT_NORMAL;
-			zap_det_process(child, 0);
-			forget_det_child(child);
-			break;
-		case DET_VM_ZERO:
-			ret = do_vm_zero(child, addr, size, opflags >> 8);
-			if (ret)
-				return ret;
-			break;
-		case DET_VM_COPY:
-			ret = do_vm_copy(child, current, child_addr, addr, size);
-			if (ret)
-				return ret;
-			break;
-		case DET_SNAP:
+	if (operation & DET_KILL) {
+		if (DET_START & flags)
+			return -EINVAL;
+		atomic_set(&child->d_status, DET_S_EXIT_NORMAL);
+		child_status = DET_S_EXIT_NORMAL;
+		zap_det_process(child, 0);
+		forget_det_child(child);
+	} else {
+		unsigned int is_memory_op = (DET_SNAP | DET_VM_ZERO | DET_VM_COPY) & operation;
+		if (is_memory_op != (is_memory_op & -is_memory_op)) {
+			return -EINVAL;
+		}
+		if (DET_SNAP & operation) {
 			ret = do_snapshot(child);
 			if (ret)
 				return ret;
-			break;
-		case DET_GET_STATUS:
-		default:
-			break;
+		} else if (DET_VM_COPY & operation) {
+			ret = do_vm_copy(child, current, child_addr, addr, size);
+			if (ret)
+				return ret;
+		} else if (DET_VM_ZERO & operation) {
+			ret = do_vm_zero(child, addr, size, opflags >> 16);
+			if (ret)
+				return ret;
+		}
+		if (DET_REGS & operation) {
+			ret = deterministic_put_regs(child, (const void __user*)addr, opflags >> 16);
+			if (ret)
+				return ret;
+		}
 	}
 
 	BUG_ON(ret < 0 || (ret & 0xff));
@@ -984,9 +988,9 @@ SYSCALL_DEFINE6(dget, pid_t, child_dpid, unsigned long, flags, unsigned long, ad
 	unsigned int operation;
 	unsigned long opflags;
 
-	operation = 0xff & flags;
-	opflags = 0xff00 & flags;
-	flags &= ~0xffffL;
+	operation = 0xffff & flags;
+	opflags = 0xff0000 & flags;
+	flags &= ~0xffL;
 
 	if (!is_valid_det_op(operation))
 		return -EINVAL;
@@ -1022,26 +1026,23 @@ SYSCALL_DEFINE6(dget, pid_t, child_dpid, unsigned long, flags, unsigned long, ad
 	}
 
 	ret = 0;
-	switch (operation) {
-		case DET_REGS:
-			ret = deterministic_get_regs(child, (void __user*)addr, opflags >> 8);
-			if (ret)
-				return ret;
-			break;
-		case DET_GET_STATUS:
-			break;
-		case DET_VM_COPY:
-			ret = do_vm_copy(current, child, addr, child_addr, size);
-			if (ret)
-				return ret;
-			break;
-		case DET_MERGE:
-			ret = do_merge(current, child, addr, size);
-			if (ret)
-				return ret;
-			break;
-		default:
-			return -EINVAL;
+	unsigned int is_memory_op = (DET_VM_COPY | DET_MERGE) & operation;
+	if (is_memory_op != (is_memory_op & -is_memory_op)) {
+		return -EINVAL;
+	}
+	if (DET_VM_COPY & operation) {
+		ret = do_vm_copy(current, child, addr, child_addr, size);
+		if (ret)
+			return ret;
+	} else if (DET_MERGE & operation) {
+		ret = do_merge(current, child, addr, size);
+		if (ret)
+			return ret;
+	}
+	if (DET_REGS & operation) {
+		ret = deterministic_get_regs(child, (void __user*)addr, opflags >> 16);
+		if (ret)
+			return ret;
 	}
 
 	BUG_ON(ret < 0 || (ret & 0xff));

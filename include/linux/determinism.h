@@ -39,28 +39,28 @@ extern long deterministic_get_regs(struct task_struct *dst,
 /* Operations for dput/dget flags argument. */
 #define DET_REGS                 1
 #define DET_BECOME_MASTER        2
-#define DET_GET_STATUS           3
-#define DET_KILL                 4
-#define DET_ALLOW_SIGNALS        5
-#define DET_VM_ZERO              6
-#define DET_VM_COPY              7
-#define DET_SNAP                 8
-#define DET_MERGE                9
-#define DET_MAX_OPERATION        10
+#define DET_GET_STATUS           4
+#define DET_KILL                 8
+#define DET_ALLOW_SIGNALS        16
+#define DET_VM_ZERO              32
+#define DET_VM_COPY              64
+#define DET_SNAP                 128
+#define DET_MERGE                256
+#define DET_MAX_OPERATION        256
 
 static inline int is_valid_det_op(unsigned long op)
 {
-	return 0 <= op && op < DET_MAX_OPERATION;
+	return 1;
 }
 
-#define DET_START                (0x0001L << 16)
-#define DET_DEBUG                (0x8000L << 16)
+#define DET_START                (0x0001L << 24)
+#define DET_DEBUG                (0x8000L << 24)
 
 /* Operation specific flags. */
 /* for: DET_GET_STATUS */
-#define DET_DONT_WAIT            (0x1L << 8)
+#define DET_DONT_WAIT            (0x1L << 16)
 /* for: DET_KILL */
-#define DET_KILL_POISON          (0x1L << 8)
+#define DET_KILL_POISON          (0x1L << 16)
 
 #define is_deterministic_or_master(tsk) ((DET_DETERMINISTIC | DET_MASTER) & (tsk)->d_flags)
 #define is_deterministic(tsk) (DET_DETERMINISTIC & (tsk)->d_flags)

@@ -1666,8 +1666,9 @@ again:
 
 		if (progress >= 32) {
 			progress = 0;
-			if (need_resched() || spin_needbreak(src_ptl) ||
-					spin_needbreak(dst_ptl) || spin_needbreak(ref_ptl))
+			if (need_resched() || spin_needbreak(dst_ptl) ||
+					(src_ptl && spin_needbreak(src_ptl)) ||
+					(ref_ptl && spin_needbreak(ref_ptl)))
 				break;
 		}
 
@@ -1698,7 +1699,7 @@ again:
 			continue;
 		else if (IS_ERR(to_fault)) {
 			/* Merge conflict! */
-			ret = -EFAULT;
+			ret = -EMERGE;
 			break;
 		} else {
 			/* Must fault in a page, so release locks, fault in the page with

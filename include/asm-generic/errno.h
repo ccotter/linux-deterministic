@@ -110,4 +110,6 @@
 
 #define EHWPOISON	133	/* Memory page has hardware error */
 
+#define EMERGE      134 /* Merge conflict */
+
 #endif
