@@ -1635,6 +1635,7 @@ static inline int merge_pte_range(
 	int rss[NR_MM_COUNTERS];
 	swp_entry_t entry = (swp_entry_t){0};
 	struct vm_area_struct *to_fault = NULL;
+	//printk(" merge_pte_range(%lx %lx) %lx %lx %lx\n", addr,end, dst_pmd,src_pmd,ref_pmd);
 
 again:
 	do_reschedule = 1;
@@ -1675,6 +1676,8 @@ again:
 		dpte = get_pte_value(dst_pte);
 		spte = get_pte_value(src_pte);
 		rpte = get_pte_value(ref_pte);
+		//if (dpte||spte||rpte)
+		//	printk("  looping(%lx) %lx %lx %lx\n", addr, dpte, spte, rpte);
 
 		if (spte == rpte) {
 			/* Source unchanged - do nothing. */
@@ -1772,15 +1775,18 @@ static inline int merge_pmd_range(
 	pmd_t *dst_pmd, *src_pmd, *ref_pmd;
 	unsigned long next;
 	int rc;
+	//printk("merge_pmd_range(%lx,%lx) %lx %lx %lx\n", addr,end,dst_pud,src_pud,ref_pud);
 
-	dst_pmd = pmd_alloc(dvma->vm_mm, dst_pud, addr);
-	if (!dst_pmd)
-		return -ENOMEM;
 	src_pmd = ref_pmd = NULL;
 	if (src_pud && !pud_none_or_clear_bad(src_pud))
 		src_pmd = pmd_offset(src_pud, addr);
 	if (ref_pud && !pud_none_or_clear_bad(ref_pud))
 		ref_pmd = pmd_offset(ref_pud, addr);
+	if (!ref_pmd && !src_pmd)
+		return 0;
+	dst_pmd = pmd_alloc(dvma->vm_mm, dst_pud, addr);
+	if (!dst_pmd)
+		return -ENOMEM;
 	do {
 		next = pmd_addr_end(addr, end);
 		split_huge_page_pmd(dvma->vm_mm, dst_pmd);
@@ -1806,20 +1812,22 @@ static inline int merge_pud_range(
 	unsigned long next;
 	int rc;
 
-	dst_pud = pud_alloc(dvma->vm_mm, dst_pgd, addr);
-	if (!dst_pud)
-		return -ENOMEM;
 	src_pud = ref_pud = NULL;
 	if (!pgd_none_or_clear_bad(src_pgd))
 		src_pud = pud_offset(src_pgd, addr);
 	if (!pgd_none_or_clear_bad(ref_pgd))
 		ref_pud = pud_offset(ref_pgd, addr);
+	if (!ref_pud && !src_pud)
+		return 0;
+	dst_pud = pud_alloc(dvma->vm_mm, dst_pgd, addr);
+	if (!dst_pud)
+		return -ENOMEM;
 	do {
 		next = pud_addr_end(addr, end);
 		if ((rc = merge_pmd_range(dst, src, dvma, svma, rmm,
 					dst_pud, src_pud, ref_pud, addr, next)))
 			return rc;
-	} while (++dst_pud, ++src_pud, ++ref_pud, addr = next, addr != end);
+	} while (++dst_pud, src_pud ? ++src_pud : 0, ref_pud ? ++ref_pud : 0, addr = next, addr != end);
 	return 0;
 }
 
@@ -1831,6 +1839,8 @@ merge_page_range(struct task_struct *dst, struct task_struct *src,
 	pgd_t *dst_pgd, *src_pgd, *ref_pgd;
 	unsigned long next;
 	int rc;
+
+	//printk("Merge_page_range %lx %lx\n", addr, end);
 
 	dst_pgd = pgd_offset(dvma->vm_mm, addr);
 	src_pgd = pgd_offset(svma->vm_mm, addr);

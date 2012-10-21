@@ -584,6 +584,18 @@ static inline int drop_mm(struct task_struct *tsk, struct mm_struct *mm, struct 
 	return 0;
 }
 
+static int do_fast_snapshot(struct task_struct *tsk)
+{
+	struct mm_struct *ref;
+	ref = dup_mm(tsk);
+	if (!ref)
+		return -ENOMEM;
+	task_lock(tsk);
+	tsk->snapshot_mm = ref;
+	task_unlock(tsk);
+	return 0;
+}
+
 /* See s390_enable_sie. */
 static int do_snapshot(struct task_struct *tsk)
 {
@@ -608,7 +620,6 @@ static int do_snapshot(struct task_struct *tsk)
 		return -EAGAIN;
 	}
 	return drop_mm(tsk, mm, ref);
-	return 0;
 }
 
 /* Ensure VMAs match up at boundaries. Returns 0 iff success, -ENOMEM otherwise.
@@ -859,6 +870,7 @@ SYSCALL_DEFINE6(dput, pid_t, child_dpid, unsigned long, flags, unsigned long, ad
 	int child_status;
 	unsigned int operation;
 	unsigned long opflags;
+	int just_created = 0;
 
 	operation = 0xffff & flags;
 	opflags = 0xff0000 & flags;
@@ -901,6 +913,7 @@ SYSCALL_DEFINE6(dput, pid_t, child_dpid, unsigned long, flags, unsigned long, ad
 			/* TODO fault. */
 			return -ENOMEM;
 		}
+		just_created = 1;
 		child->snapshot_mm = NULL;
 		child->d_parent = current;
 		child->d_pid = child_dpid;
@@ -946,7 +959,11 @@ SYSCALL_DEFINE6(dput, pid_t, child_dpid, unsigned long, flags, unsigned long, ad
 			return -EINVAL;
 		}
 		if (DET_SNAP & operation) {
-			ret = do_snapshot(child);
+			if (just_created) {
+				ret = do_fast_snapshot(child);
+			} else {
+				ret = do_snapshot(child);
+			}
 			if (ret)
 				return ret;
 		} else if (DET_VM_COPY & operation) {
