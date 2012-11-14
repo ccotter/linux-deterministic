@@ -1,0 +1,48 @@
+# Syscall impl.
+9     include/linux/syscalls.h
+7     arch/x86/include/asm/ptrace-abi.h
+8     arch/x86/include/asm/unistd_64.h
+39    arch/x86/kernel/entry_64.S
+3     arch/x86/kernel/process.c
+31    arch/x86/kernel/ptrace.c
+9     arch/x86/kernel/sys_x86_64.c
+21    arch/x86/kernel/syscall_64.c
+5     arch/x86/kernel/syscall_table_32.S
+10    include/asm-generic/unistd.h
+972   determinism/determinism.c
+73    include/linux/determinism.h
+1187  TOTAL
+
+# Memory subsystem
+3     arch/x86/kvm/x86.c
+4     arch/x86/mm/mmap.c
+3     arch/x86/vdso/vma.c
+3     drivers/acpi/acpica/nsrepair.c
+4     drivers/gpu/drm/drm_bufs.c
+3     fs/aio.c
+5     fs/bad_inode.c
+12    fs/binfmt_elf.c
+4     fs/hugetlbfs/inode.c
+51    include/linux/mm.h
+6     include/linux/mm_types.h
+8     mm/fremap.c
+4     mm/internal.h
+8     mm/madvise.c
+773   mm/memory.c
+44    mm/mlock.c
+118   mm/mmap.c
+21    mm/mremap.c
+7     mm/slab.c
+1081  TOTAL
+
+# Misc.
+4     include/asm-generic/errno.h
+4     include/linux/fs.h
+9     include/linux/kernel.h
+21    include/linux/sched.h
+4     include/linux/signal.h
+8     ipc/shm.c
+30    kernel/exit.c
+170   kernel/fork.c
+46    kernel/signal.c
+296   TOTAL

@@ -1,0 +1,45 @@
+# Syscall impl.
+include/linux/syscalls.h
+arch/x86/include/asm/ptrace-abi.h
+arch/x86/include/asm/unistd_64.h
+arch/x86/kernel/entry_64.S
+arch/x86/kernel/process.c
+arch/x86/kernel/ptrace.c
+arch/x86/kernel/sys_x86_64.c
+arch/x86/kernel/syscall_64.c
+arch/x86/kernel/syscall_table_32.S
+include/asm-generic/unistd.h
+determinism/determinism.c
+include/linux/determinism.h
+
+# Memory subsystem
+arch/x86/kvm/x86.c
+arch/x86/mm/mmap.c
+arch/x86/vdso/vma.c
+drivers/acpi/acpica/nsrepair.c
+drivers/gpu/drm/drm_bufs.c
+fs/aio.c
+fs/bad_inode.c
+fs/binfmt_elf.c
+fs/hugetlbfs/inode.c
+include/linux/mm.h
+include/linux/mm_types.h
+mm/fremap.c
+mm/internal.h
+mm/madvise.c
+mm/memory.c
+mm/mlock.c
+mm/mmap.c
+mm/mremap.c
+mm/slab.c
+
+# Misc.
+include/asm-generic/errno.h
+include/linux/fs.h
+include/linux/kernel.h
+include/linux/sched.h
+include/linux/signal.h
+ipc/shm.c
+kernel/exit.c
+kernel/fork.c
+kernel/signal.c
