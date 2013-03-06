@@ -1635,7 +1635,6 @@ static inline int merge_pte_range(
 	int rss[NR_MM_COUNTERS];
 	swp_entry_t entry = (swp_entry_t){0};
 	struct vm_area_struct *to_fault = NULL;
-	//printk(" merge_pte_range(%lx %lx) %lx %lx %lx\n", addr,end, dst_pmd,src_pmd,ref_pmd);
 
 again:
 	do_reschedule = 1;

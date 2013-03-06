@@ -1,0 +1,168 @@
+
+A merge code path for merge_mapped_range has an issue where get_page() is called
+on a huge page leading to the following trace. I think the fix would be to
+somehow call the huge page split method.
+
+[34630.352834] kernel BUG at include/linux/mm.h:373!
+[34630.352862] invalid opcode: 0000 [#1] PREEMPT SMP 
+[34630.352901] CPU 2 
+[34630.352915] Modules linked in: ipv6 aes_generic arc4 radeon rtl8187 eeprom_93cx6 drm_kms_helper ttm mac80211 drm iTCO_wdt agpgart iTCO_vendor_support i2c_algo_bit i2c_core hp_wmi cfg80211 psmouse tg3 i5400_edac sparse_keymap rfkill evdev pcspkr serio_raw edac_core shpchp pci_hotplug libphy wmi i5k_amb button processor floppy uhci_hcd ehci_hcd usbhid hid usbcore ata_piix sr_mod ata_generic sd_mod pata_acpi cdrom ahci libahci libata scsi_mod
+[34630.353208] 
+[34630.353208] Pid: 29544, comm: pqsort Not tainted 3.0.0-ARCH-00022-g7067a5c #324 Hewlett-Packard HP xw6600 Workstation/0A9Ch
+[34630.353208] RIP: 0010:[<ffffffff8114c869>]  [<ffffffff8114c869>] merge_page_range+0x1509/0x1510
+[34630.353208] RSP: 0018:ffff88021e8fdcf0  EFLAGS: 00010297
+[34630.353208] RAX: 0000000000000001 RBX: ffffea0005139608 RCX: ffffea000005f6a8
+[34630.353208] RDX: 0000000000000000 RSI: 0000000000e00000 RDI: ffffffff81b43000
+[34630.353208] RBP: ffff88021e8fde80 R08: 0000000000000000 R09: 0000000000000000
+[34630.353208] R10: ffff8802203dd6f8 R11: 0000000000000000 R12: ffffea0000000348
+[34630.353208] R13: ffff880221723000 R14: ffff88021e83d000 R15: ffff880220bf4930
+[34630.353208] FS:  0000000000000000(0000) GS:ffff88022f200000(0000) knlGS:0000000000000000
+[34630.353208] CS:  0010 DS: 0000 ES: 0000 CR0: 000000008005003b
+[34630.353208] CR2: 00007fffdf76242c CR3: 0000000221744000 CR4: 00000000000006e0
+[34630.353208] DR0: 0000000000000000 DR1: 0000000000000000 DR2: 0000000000000000
+[34630.353208] DR3: 0000000000000000 DR6: 00000000ffff0ff0 DR7: 0000000000000400
+[34630.353208] Process pqsort (pid: 29544, threadinfo ffff88021e8fc000, task ffff8802203dcf40)
+[34630.353208] Stack:
+[34630.353208]  ffff88021f2e9300 ffff88021f519e70 ffff88021f2ec2e0 000000008114a9fb
+[34630.353208]  ffff88021e8fdd40 0000000000000006 000e40000000f8bf 0000000000ddafff
+[34630.353208]  ffff880221744000 0000000000ddafff ffff880220ea0000 ffff88021f130000
+[34630.353208] Call Trace:
+[34630.353208]  [<ffffffff81286bf5>] ? sys_dget+0x245/0x750
+[34630.353208]  [<ffffffff81286faf>] sys_dget+0x5ff/0x750
+[34630.353208]  [<ffffffff8144f255>] ? _raw_spin_unlock+0x35/0x60
+[34630.353208]  [<ffffffff81450393>] stub_dget+0x13/0x20
+[34630.353208]  [<ffffffff8144ff62>] ? system_call_fastpath+0x36/0x38
+[34630.353208] Code: 50 08 85 d2 0f 8e b5 fe ff ff f0 ff 40 08 e9 40 f4 ff ff 48 8b 43 10 8b 50 08 85 d2 0f 8e 9d fe ff ff f0 ff 40 08 e9 f9 f3 ff ff <0f> 0b 0f 1f 44 00 00 55 48 89 e5 41 57 41 56 41 55 41 54 53 48 
+[34630.353208] RIP  [<ffffffff8114c869>] merge_page_range+0x1509/0x1510
+[34630.353208]  RSP <ffff88021e8fdcf0>
+[34630.353208] BUG: scheduling while atomic: pqsort/29544/0x00000004
+[34630.353208] INFO: lockdep is turned off.
+[34630.353208] Modules linked in: ipv6 aes_generic arc4 radeon rtl8187 eeprom_93cx6 drm_kms_helper ttm mac80211 drm iTCO_wdt agpgart iTCO_vendor_support i2c_algo_bit i2c_core hp_wmi cfg80211 psmouse tg3 i5400_edac sparse_keymap rfkill evdev pcspkr serio_raw edac_core shpchp pci_hotplug libphy wmi i5k_amb button processor floppy uhci_hcd ehci_hcd usbhid hid usbcore ata_piix sr_mod ata_generic sd_mod pata_acpi cdrom ahci libahci libata scsi_mod
+[34630.353208] Pid: 29544, comm: pqsort Not tainted 3.0.0-ARCH-00022-g7067a5c #324
+[34630.353208] Call Trace:
+[34630.353208]  [<ffffffff814446e1>] __schedule_bug+0x6a/0x6f
+[34630.353208]  [<ffffffff8144b981>] schedule+0x941/0x950
+[34630.353208]  [<ffffffff8144bffb>] schedule_timeout+0x18b/0x380
+[34630.353208]  [<ffffffff8108ff20>] ? usleep_range+0x50/0x50
+[34630.353208]  [<ffffffffa032e988>] radeon_pm_set_clocks+0x488/0x650 [radeon]
+[34630.353208]  [<ffffffff810a4e70>] ? __init_waitqueue_head+0x60/0x60
+[34630.353208]  [<ffffffffa01e416b>] ? drm_fb_helper_blank+0x8b/0x1a0 [drm_kms_helper]
+[34630.353208]  [<ffffffffa032f820>] radeon_pm_compute_clocks+0xd0/0x240 [radeon]
+[34630.353208]  [<ffffffffa02c01eb>] atombios_crtc_dpms+0x3b/0x110 [radeon]
+[34630.353208]  [<ffffffffa01e41b8>] drm_fb_helper_blank+0xd8/0x1a0 [drm_kms_helper]
+[34630.353208]  [<ffffffff812c7a39>] fb_blank+0x39/0x80
+[34630.353208]  [<ffffffff812d3f3b>] fbcon_blank+0x21b/0x2d0
+[34630.353208]  [<ffffffff81090728>] ? lock_timer_base.isra.28+0x38/0x70
+[34630.353208]  [<ffffffff8144f1f0>] ? _raw_spin_unlock_irqrestore+0x40/0x70
+[34630.353208]  [<ffffffff81091e8d>] ? mod_timer+0x15d/0x300
+[34630.353208]  [<ffffffff8132e562>] do_unblank_screen+0xc2/0x1e0
+[34630.353208]  [<ffffffff8132e690>] unblank_screen+0x10/0x20
+[34630.353208]  [<ffffffff81295069>] bust_spinlocks+0x19/0x40
+[34630.353208]  [<ffffffff8103b2cf>] oops_end+0x3f/0xe0
+[34630.353208]  [<ffffffff8103b4c8>] die+0x58/0x90
+[34630.353208]  [<ffffffff81037c90>] do_trap+0xc0/0x170
+[34630.353208]  [<ffffffff81037f9b>] do_invalid_op+0xab/0xc0
+[34630.353208]  [<ffffffff8114c869>] ? merge_page_range+0x1509/0x1510
+[34630.353208]  [<ffffffff8103f4a9>] ? sched_clock+0x9/0x10
+[34630.353208]  [<ffffffff810ac0d5>] ? sched_clock_local+0x25/0xa0
+[34630.353208]  [<ffffffff81450c9b>] invalid_op+0x1b/0x20
+[34630.353208]  [<ffffffff8114c869>] ? merge_page_range+0x1509/0x1510
+[34630.353208]  [<ffffffff81286bf5>] ? sys_dget+0x245/0x750
+[34630.353208]  [<ffffffff81286faf>] sys_dget+0x5ff/0x750
+[34630.353208]  [<ffffffff8144f255>] ? _raw_spin_unlock+0x35/0x60
+[34630.353208]  [<ffffffff81450393>] stub_dget+0x13/0x20
+[34630.353208]  [<ffffffff8144ff62>] ? system_call_fastpath+0x36/0x38
+[34630.553228] BUG: scheduling while atomic: pqsort/29544/0x00000004
+[34630.554921] INFO: lockdep is turned off.
+[34630.556614] Modules linked in: ipv6 aes_generic arc4 radeon rtl8187 eeprom_93cx6 drm_kms_helper ttm mac80211 drm iTCO_wdt agpgart iTCO_vendor_support i2c_algo_bit i2c_core hp_wmi cfg80211 psmouse tg3 i5400_edac sparse_keymap rfkill evdev pcspkr serio_raw edac_core shpchp pci_hotplug libphy wmi i5k_amb button processor floppy uhci_hcd ehci_hcd usbhid hid usbcore ata_piix sr_mod ata_generic sd_mod pata_acpi cdrom ahci libahci libata scsi_mod
+[34630.562334] Pid: 29544, comm: pqsort Not tainted 3.0.0-ARCH-00022-g7067a5c #324
+[34630.564208] Call Trace:
+[34630.566053]  [<ffffffff814446e1>] __schedule_bug+0x6a/0x6f
+[34630.567938]  [<ffffffff8144b981>] schedule+0x941/0x950
+[34630.569812]  [<ffffffff8144bffb>] schedule_timeout+0x18b/0x380
+[34630.571688]  [<ffffffff8108ff20>] ? usleep_range+0x50/0x50
+[34630.573546]  [<ffffffffa032eaac>] radeon_pm_set_clocks+0x5ac/0x650 [radeon]
+[34630.575384]  [<ffffffff810a4e70>] ? __init_waitqueue_head+0x60/0x60
+[34630.577233]  [<ffffffffa01e416b>] ? drm_fb_helper_blank+0x8b/0x1a0 [drm_kms_helper]
+[34630.579092]  [<ffffffffa032f820>] radeon_pm_compute_clocks+0xd0/0x240 [radeon]
+[34630.580951]  [<ffffffffa02c01eb>] atombios_crtc_dpms+0x3b/0x110 [radeon]
+[34630.582795]  [<ffffffffa01e41b8>] drm_fb_helper_blank+0xd8/0x1a0 [drm_kms_helper]
+[34630.584668]  [<ffffffff812c7a39>] fb_blank+0x39/0x80
+[34630.586528]  [<ffffffff812d3f3b>] fbcon_blank+0x21b/0x2d0
+[34630.588407]  [<ffffffff81090728>] ? lock_timer_base.isra.28+0x38/0x70
+[34630.590292]  [<ffffffff8144f1f0>] ? _raw_spin_unlock_irqrestore+0x40/0x70
+[34630.592115]  [<ffffffff81091e8d>] ? mod_timer+0x15d/0x300
+[34630.593889]  [<ffffffff8132e562>] do_unblank_screen+0xc2/0x1e0
+[34630.595637]  [<ffffffff8132e690>] unblank_screen+0x10/0x20
+[34630.597390]  [<ffffffff81295069>] bust_spinlocks+0x19/0x40
+[34630.599122]  [<ffffffff8103b2cf>] oops_end+0x3f/0xe0
+[34630.600859]  [<ffffffff8103b4c8>] die+0x58/0x90
+[34630.602534]  [<ffffffff81037c90>] do_trap+0xc0/0x170
+[34630.604167]  [<ffffffff81037f9b>] do_invalid_op+0xab/0xc0
+[34630.605734]  [<ffffffff8114c869>] ? merge_page_range+0x1509/0x1510
+[34630.607288]  [<ffffffff8103f4a9>] ? sched_clock+0x9/0x10
+[34630.608813]  [<ffffffff810ac0d5>] ? sched_clock_local+0x25/0xa0
+[34630.610350]  [<ffffffff81450c9b>] invalid_op+0x1b/0x20
+[34630.611871]  [<ffffffff8114c869>] ? merge_page_range+0x1509/0x1510
+[34630.613419]  [<ffffffff81286bf5>] ? sys_dget+0x245/0x750
+[34630.614950]  [<ffffffff81286faf>] sys_dget+0x5ff/0x750
+[34630.616477]  [<ffffffff8144f255>] ? _raw_spin_unlock+0x35/0x60
+[34630.618020]  [<ffffffff81450393>] stub_dget+0x13/0x20
+[34630.619539]  [<ffffffff8144ff62>] ? system_call_fastpath+0x36/0x38
+[34630.761499] ---[ end trace c4f9811aa5362eef ]---
+[34630.763017] note: pqsort[29544] exited with preempt_count 3
+[34630.764613] BUG: sleeping function called from invalid context at kernel/rwsem.c:21
+[34630.766158] in_atomic(): 1, irqs_disabled(): 0, pid: 29544, name: pqsort
+[34630.767726] INFO: lockdep is turned off.
+[34630.769286] Pid: 29544, comm: pqsort Tainted: G      D     3.0.0-ARCH-00022-g7067a5c #324
+[34630.770902] Call Trace:
+[34630.772485]  [<ffffffff8106baf2>] __might_sleep+0x102/0x130
+[34630.774098]  [<ffffffff8144dc16>] down_read+0x26/0x93
+[34630.775699]  [<ffffffff8108260e>] ? kmsg_dump+0x7e/0x140
+[34630.777320]  [<ffffffff810d201e>] acct_collect+0x4e/0x1b0
+[34630.778933]  [<ffffffff810850c3>] do_exit+0x6f3/0x8e0
+[34630.780559]  [<ffffffff81082695>] ? kmsg_dump+0x105/0x140
+[34630.782184]  [<ffffffff8103b32c>] oops_end+0x9c/0xe0
+[34630.783824]  [<ffffffff8103b4c8>] die+0x58/0x90
+[34630.785447]  [<ffffffff81037c90>] do_trap+0xc0/0x170
+[34630.787079]  [<ffffffff81037f9b>] do_invalid_op+0xab/0xc0
+[34630.788704]  [<ffffffff8114c869>] ? merge_page_range+0x1509/0x1510
+[34630.790350]  [<ffffffff8103f4a9>] ? sched_clock+0x9/0x10
+[34630.791984]  [<ffffffff810ac0d5>] ? sched_clock_local+0x25/0xa0
+[34630.793626]  [<ffffffff81450c9b>] invalid_op+0x1b/0x20
+[34630.795267]  [<ffffffff8114c869>] ? merge_page_range+0x1509/0x1510
+[34630.796927]  [<ffffffff81286bf5>] ? sys_dget+0x245/0x750
+[34630.798570]  [<ffffffff81286faf>] sys_dget+0x5ff/0x750
+[34630.800225]  [<ffffffff8144f255>] ? _raw_spin_unlock+0x35/0x60
+[34630.801866]  [<ffffffff81450393>] stub_dget+0x13/0x20
+[34630.803506]  [<ffffffff8144ff62>] ? system_call_fastpath+0x36/0x38
+[34630.805096] BUG: scheduling while atomic: pqsort/29544/0x00000004
+[34630.806653] INFO: lockdep is turned off.
+[34630.808142] Modules linked in: ipv6 aes_generic arc4 radeon rtl8187 eeprom_93cx6 drm_kms_helper ttm mac80211 drm iTCO_wdt agpgart iTCO_vendor_support i2c_algo_bit i2c_core hp_wmi cfg80211 psmouse tg3 i5400_edac sparse_keymap rfkill evdev pcspkr serio_raw edac_core shpchp pci_hotplug libphy wmi i5k_amb button processor floppy uhci_hcd ehci_hcd usbhid hid usbcore ata_piix sr_mod ata_generic sd_mod pata_acpi cdrom ahci libahci libata scsi_mod
+[34630.813137] Pid: 29544, comm: pqsort Tainted: G      D     3.0.0-ARCH-00022-g7067a5c #324
+[34630.814790] Call Trace:
+[34630.816424]  [<ffffffff814446e1>] __schedule_bug+0x6a/0x6f
+[34630.818086]  [<ffffffff8144b981>] schedule+0x941/0x950
+[34630.819727]  [<ffffffff8144e4c5>] rwsem_down_failed_common+0xc5/0x160
+[34630.821383]  [<ffffffff8144e595>] rwsem_down_read_failed+0x15/0x17
+[34630.823010]  [<ffffffff81293f94>] call_rwsem_down_read_failed+0x14/0x30
+[34630.824647]  [<ffffffff8144dc6e>] ? down_read+0x7e/0x93
+[34630.826261]  [<ffffffff810d201e>] ? acct_collect+0x4e/0x1b0
+[34630.827875]  [<ffffffff810d201e>] acct_collect+0x4e/0x1b0
+[34630.829467]  [<ffffffff810850c3>] do_exit+0x6f3/0x8e0
+[34630.831071]  [<ffffffff81082695>] ? kmsg_dump+0x105/0x140
+[34630.832658]  [<ffffffff8103b32c>] oops_end+0x9c/0xe0
+[34630.834256]  [<ffffffff8103b4c8>] die+0x58/0x90
+[34630.835827]  [<ffffffff81037c90>] do_trap+0xc0/0x170
+[34630.837407]  [<ffffffff81037f9b>] do_invalid_op+0xab/0xc0
+[34630.838971]  [<ffffffff8114c869>] ? merge_page_range+0x1509/0x1510
+[34630.840553]  [<ffffffff8103f4a9>] ? sched_clock+0x9/0x10
+[34630.842121]  [<ffffffff810ac0d5>] ? sched_clock_local+0x25/0xa0
+[34630.843705]  [<ffffffff81450c9b>] invalid_op+0x1b/0x20
+[34630.845285]  [<ffffffff8114c869>] ? merge_page_range+0x1509/0x1510
+[34630.846882]  [<ffffffff81286bf5>] ? sys_dget+0x245/0x750
+[34630.848462]  [<ffffffff81286faf>] sys_dget+0x5ff/0x750
+[34630.850052]  [<ffffffff8144f255>] ? _raw_spin_unlock+0x35/0x60
+[34630.851636]  [<ffffffff81450393>] stub_dget+0x13/0x20
+[34630.853226]  [<ffffffff8144ff62>] ? system_call_fastpath+0x36/0x38
+

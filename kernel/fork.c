@@ -1573,6 +1573,7 @@ long do_fork(unsigned long clone_flags,
 	return nr;
 }
 
+void wake_up_new_dtask(struct task_struct*);
 /* Similar to do_fork, but for deterministic processes. Special
  * attention must be given to the setup of such processes. The
  * created process is always in state TASK_STOPPED. */
@@ -1590,8 +1591,9 @@ long do_dfork(unsigned long clone_flags,
 	p = copy_process(clone_flags, stack_start, regs, stack_size,
 			 child_tidptr, NULL, 0);
 	if (!IS_ERR(p)) {
-        /* Flush all signals, block all but SIGKILL. This is undeterministic, since
-		 * any process then can send a SIGKILL, but this is useful for debugging. */
+        /* Flush all signals, block all but SIGKILL. This is undeterministic,
+		 * since any process then can send a SIGKILL, but this is useful for
+		 * debugging. */
         sigset_t blocked;
         sigfillset(&blocked);
         sigdelsetmask(&blocked, sigmask(SIGKILL));
@@ -1601,6 +1603,7 @@ long do_dfork(unsigned long clone_flags,
 		nr = task_pid_vnr(p);
 		audit_finish_fork(p);
 
+		wake_up_new_dtask(p);
         set_task_state(p, TASK_STOPPED);
 
 		*result = p;

@@ -395,7 +395,8 @@ static int do_vm_copy(struct task_struct *dst, struct task_struct *src,
 	int ret = -ENOMEM;
 	struct mm_struct *dmm = dst->mm;
 	struct mm_struct *smm = src->mm;
-	unsigned long start_page, end_page, lowest, highest, dst_start_page, dst_end_page;
+	unsigned long start_page, end_page, lowest, highest;
+	unsigned long dst_start_page, dst_end_page;
 	unsigned long end = addr + len;
 	unsigned long dst_end = dst_addr + len;
 	struct vm_area_struct *vma, *prev;
@@ -474,9 +475,11 @@ static int do_vm_copy(struct task_struct *dst, struct task_struct *src,
 
 	/* First, unmap destination. Only unmap page aligned subregion.
 	 * Then map VMAs to match those of the source. */
-	if (dst_end_page != dst_start_page) {
-		if (unlikely(do_munmap(dmm, dst_start_page, dst_end_page - dst_start_page)))
+	if (dst_end_page > dst_start_page) {
+		if (unlikely(do_munmap(dmm, dst_start_page,
+						dst_end_page - dst_start_page))) {
 			goto unlock;
+		}
 	}
 
 	if (start_page > end_page) {
@@ -701,13 +704,13 @@ manually_merge(struct task_struct *dst,
 	/* Now that we have the pages, become atomic and map the pages.
 	 * Atomic mappings always succeed. */
 	preempt_disable();
-	daddr = kmap_atomic(dpage);
 	saddr = kmap_atomic(spage);
+	daddr = kmap_atomic(dpage);
 	raddr = kmap_atomic(rpage);
 	ret = merge_mapped_range(daddr, saddr, raddr, addr - aligned, len);
 	kunmap_atomic(raddr);
-	kunmap_atomic(saddr);
 	kunmap_atomic(daddr);
+	kunmap_atomic(saddr);
 	preempt_enable();
 
 	put_page(rpage);
@@ -904,14 +907,25 @@ SYSCALL_DEFINE6(dput, pid_t, child_dpid, unsigned long, flags, unsigned long, ad
 	child = find_deterministic_child(current, child_dpid);
 
 	if (!child) {
+		unsigned long clone_flags = CLONE_FS | CLONE_FILES | CLONE_SYSVSEM;
 		if (child_dpid < 0)
 			return -EINVAL;
 
 		/* We don't want a SIGCHLD signal when the child dies. */
-		ret = do_dfork(0, regs->sp, regs, 0, NULL, NULL, &child);
+		ret = do_dfork(clone_flags, regs->sp, regs, 0, NULL, NULL, &child);
 		if (unlikely(ret < 0)) {
+#if 0
+			if (-ERESTART_RESTARTBLOCK <= ret &&
+					ret <= -ERESTARTSYS && 
+					ret != -ENOIOCTLCMD) {
+				return ret;
+			}
 			/* TODO fault. */
+			printk("do_dfork said %d\n", ret);
 			return -ENOMEM;
+#else
+			return ret;
+#endif
 		}
 		just_created = 1;
 		child->snapshot_mm = NULL;
@@ -1037,8 +1051,8 @@ SYSCALL_DEFINE6(dget, pid_t, child_dpid, unsigned long, flags, unsigned long, ad
 	}
 
 	if (!(DET_S_READY == child_status)) {
-		/* Can't work with a non-runnable child. Must have faulted or already exited
-		 * cleanly. */
+		/* Can't work with a non-runnable child. Must have faulted or already
+		 * exited cleanly. */
 		return child_status;
 	}
 
